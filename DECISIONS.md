@@ -802,10 +802,13 @@ weeks of margin, not days:
 
 If Phase 2 or 3 overruns, cut scope from them — never from Phase 4's date.
 
-**Opportunity, for decision:** the prior-term course above is archivable *today*.
-It is proposed disabled because it is not current, but the archive's whole
-premise says to take what is still readable. Re-enabling it for a Phase 4
-backfill is cheap; losing it to revocation is permanent.
+**Prior-term backfill — decided 2026-09-11: yes, as a one-off command.** The
+prior-term course above is readable today and may not be later, and taking
+what is still available is the archive's whole purpose. It is archived by a
+**one-off backfill command, run once Phase 4 works** — not by enabling it as a
+context. It stays **out of the 20-minute poll**: nothing new will ever be posted
+to a concluded course, so polling it would spend the rate-limit budget watching
+something that cannot change.
 
 ---
 
@@ -866,7 +869,7 @@ context that stays unverified is surfaced as stale rather than as quiet.
 
 ---
 
-## D-39 — Real enrolment data was committed to a repo that will be public · partly applied, history pending
+## D-39 — Real enrolment data was committed to a repo that will be public · resolved 2026-09-11
 
 **What happened.** Phase 1 committed my real module codes — current semester,
 prior semester and the admin courses — to `DECISIONS.md`, `SPEC.md` and the
@@ -884,14 +887,37 @@ codes. **Policy from here: tests and docs never use real ids or codes.**
 Left alone deliberately: the module code in SPEC §12's notification
 mock-up. That was in the spec as originally written, by my choice.
 
-**Pending — history.** The working-tree fix does not remove the data from
-commits `407a00b` and `230a7e3`, and pushing publishes history. A rewrite
-before the remote is created is cheap; after, it is impossible to retract.
-Awaiting my decision.
+**Resolved — history squashed before any remote existed.** At my direction,
+the six pre-publication commits were squashed into a single root commit built
+from the scrubbed tree; granular history was deliberately not kept. The old
+objects were then purged (reflog expired, `gc --prune=now`), so they are gone
+from `.git`, not merely unreferenced.
+
+**Verified, not assumed**, against a pattern covering every real module code,
+course id, group id, `canvas_user_id` and course name:
+
+- `git log -p --all`: no match outside SPEC.md; inside it, only the §12 example.
+- Positive control: the same pattern finds 50 matches in the (ignored) seed
+  file, so "no match" means absent, not a pattern that cannot match.
+- Object database: 0 of 79 objects contain real data beyond the §12 example.
+  The old tip no longer resolves; zero reflog entries; zero unreachable objects.
+
+**Two lessons, recorded because both recurred in this incident:**
+
+1. My first "clean" audit excluded the §12 module code as allowed, and so
+   missed a *test* that used the same code — and never searched course *names*
+   at all. An audit pattern must cover identifiers, codes **and** names, with
+   the allowlist applied per file rather than per string.
+2. The squash commit was first blocked by this repo's own credential scan: a
+   synthetic token in a test was committed before the scan existed, so it had
+   never been scanned as an addition. Test fixtures that look like credentials
+   are now assembled at runtime. The block was correct; the chained command
+   that deleted `main` anyway was not, and destructive steps are now gated on
+   the previous step succeeding.
 
 ---
 
-## D-40 — Route-once and Phase 4-before-5 conflict · open, needs a decision before Phase 4
+## D-40 — Route-once and Phase 4-before-5 conflict · accepted 2026-09-11, lands in Phase 4
 
 Phase 4 downloads files; routing rules arrive in Phase 5. Under SPEC §8's
 route-once rule, a file's folder is decided on first sight and never changes —
@@ -908,5 +934,36 @@ Two resolutions:
 2. **Ship the seed routing defaults in Phase 4** and treat Phase 5 as rule
    tuning.
 
-Recommendation: both. (2) means most files land correctly from the first
-download; (1) means the rest are not stranded.
+**Accepted: both.** The seed routing defaults ship in Phase 4, and a file in
+`_unsorted` may be re-routed **exactly once**, when a rule first matches it.
+Every other destination is final.
+
+This is not a route-once violation. `_unsorted` is explicitly the "we don't know
+yet" state. Route-once exists to stop Canvas reorganisation shuffling my tree —
+not to make a placeholder placement permanent. Promoting out of the placeholder
+once is the pressure valve working as SPEC §8 intended.
+
+
+---
+
+## D-41 — `silent_sync`: the first sync baselines instead of notifying · accepted, lands in Phase 2
+
+**Not in the original spec** — recorded here so that it now is. The name is
+mine from the Phase 2 go-ahead; the behaviour was proposed during the Phase 1
+review.
+
+**The problem:** the first sync of any context finds everything already posted
+this semester. Treated as new, it would notify me of every announcement and
+assignment since week 1 in one burst — the first-week experience SPEC §12 warns
+will get the bot muted.
+
+**Behaviour:** for each `(context, resource_type)` with no watermark yet, the
+first sync runs as `silent_sync`: every existing item is recorded as `seen`,
+with `notified_at` set, and nothing is sent per item. One **"now watching"
+summary** is sent instead, per sync run that baselined anything, naming the
+contexts and item counts, so the silence is explained rather than mysterious.
+
+**What it must not suppress:** a baseline records what exists; it does not
+vouch for it. Operational alerts (a 401, a stale context, an unverified empty
+announcements result under D-38) are never silenced by `silent_sync`, because
+those describe the system's health, not content I have already seen.

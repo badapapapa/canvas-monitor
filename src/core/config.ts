@@ -17,6 +17,13 @@ interface KeySpec {
   readonly default?: string;
   /** Env var accepted by `set-config --from-env` for first-run bootstrap. */
   readonly envVar?: string;
+  /**
+   * Shape check applied by `set-config` before anything is stored. Catches the
+   * pasted-into-the-wrong-key mistake at entry, rather than as a silent send
+   * failure the first night it matters.
+   */
+  readonly pattern?: RegExp;
+  readonly formatHint?: string;
 }
 
 export const CONFIG_SPEC = {
@@ -45,6 +52,29 @@ export const CONFIG_SPEC = {
     secret: false,
     description: 'Age at which `npm run prune-raw` deletes captures.',
     default: '60',
+    pattern: /^\d{1,4}$/,
+    formatHint: 'a whole number of days, e.g. 60',
+  },
+  telegram_bot_token: {
+    secret: true,
+    description: 'Telegram bot token from @BotFather.',
+    envVar: 'TELEGRAM_BOT_TOKEN',
+    pattern: /^\d{5,15}:[A-Za-z0-9_-]{30,}$/,
+    formatHint: '<digits>:<35 characters>, exactly as @BotFather printed it',
+  },
+  telegram_content_chat_id: {
+    secret: false,
+    description: 'Chat that receives content notifications -- your personal chat with the bot.',
+    envVar: 'TELEGRAM_CONTENT_CHAT_ID',
+    pattern: /^-?\d{1,20}$/,
+    formatHint: 'an integer; a personal chat id is positive',
+  },
+  telegram_ops_chat_id: {
+    secret: false,
+    description: 'Chat that receives operational alerts only -- must differ from the content chat.',
+    envVar: 'TELEGRAM_OPS_CHAT_ID',
+    pattern: /^-?\d{1,20}$/,
+    formatHint: 'an integer; a group chat id is negative, often starting -100',
   },
 } as const satisfies Record<string, KeySpec>;
 

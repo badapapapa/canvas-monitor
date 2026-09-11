@@ -447,7 +447,13 @@ Target tree: `Canvas/<term>/<module_code>/<target_folder>/`.
 
 **`_unsorted` is the pressure valve.** Anything unmatched goes there and appears
 in the notification flagged as needing a rule. This converts silent misrouting
-into a visible prompt. Attach a `route_confidence` score; anything below
+into a visible prompt.
+
+`_unsorted` is the **"we don't know yet"** state, not a decision. A file there may
+be re-routed **exactly once**, when a rule first matches it; every other
+destination is final (DECISIONS.md D-40). Route-once stops Canvas reorganisation
+from shuffling my tree — it does not make a placeholder permanent. The seed
+defaults below ship with Phase 4, so most files never touch `_unsorted` at all. Attach a `route_confidence` score; anything below
 threshold also goes to `_unsorted` even if a rule technically matched.
 
 Files discovered via the modules fallback have no Canvas folder — use module
@@ -634,6 +640,10 @@ BT2102 — 3 new files
 - Telegram caps a message at 4096 characters. A busy course exceeds it; split on
   item boundaries rather than truncating.
 - The bot cannot open a conversation — I must `/start` it once.
+- **First sync is silent (`silent_sync`, DECISIONS.md D-41).** A context's first
+  sync records every existing item as seen and sends one "now watching" summary
+  instead of a notification per item. Operational alerts are never silenced by
+  it.
 - **Quiet hours 22:00–07:00 SGT,** held in the `notifications` table with
   `state='queued'` and a `release_after`, and released as a morning digest.
   There is no long-lived process to hold a message in memory. Override for
@@ -716,7 +726,7 @@ Ship and use each phase before starting the next. **Do not build ahead.**
 | 1 | `npm run discover` (§16), mapping table, coverage detection, section resolution, `enrollment_state=completed` probe | `courses.seed.json` reviewed and loaded; coverage correct for every module |
 | 2 | Announcements + assignments + submissions/feedback ingest. **Notification only, no downloading.** Section-override fixture captured first. | Runs a week; alerts feel correct and timely |
 | 3 | Files + modules fallback + groups ingest. Still no downloading. | New files detected reliably, zero false positives |
-| 4 | OneDrive upload, atomicity, size gate, resumable upload | Files land correctly and are verified |
+| 4 | OneDrive upload, atomicity, size gate, resumable upload, **seed routing defaults** (D-40), one-off **prior-term backfill** command (D-36) | Files land correctly and are verified |
 | 5 | Routing rules, `_unsorted` flow, `--replay` | Most files route correctly; misroutes are visible |
 | 6 | `npm run tune-patterns`, then answer follow-ups | Patterns confirmed against real history; tracking works end to end |
 | 7 | Versioning Tiers 1–3, reconciliation command, FTS5 search | No duplicate confusion |

@@ -52,6 +52,18 @@ export async function runSetConfig(
     }
   }
 
+  const pattern = 'pattern' in spec ? spec.pattern : undefined;
+  if (pattern !== undefined && !pattern.test(value)) {
+    const hint = 'formatHint' in spec ? spec.formatHint : undefined;
+    // Never echo the value: this path handles secrets, and a mis-pasted token
+    // would otherwise land in the terminal scrollback and the run log.
+    throw new AppError(
+      'config_invalid',
+      `That does not look like a valid ${key} (${value.length} characters). Nothing was stored.`,
+      hint === undefined ? undefined : `Expected ${hint}.`,
+    );
+  }
+
   await setConfig(ctx.db, ctx.clock, key, value);
 
   ctx.log.info('config.set', { key, secret: spec.secret, dry_run: ctx.dryRun });
