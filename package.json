@@ -18,7 +18,9 @@
     "check": "npm run typecheck && npm run test",
     "hooks:install": "git config core.hooksPath .githooks",
     "discover": "node src/cli/index.ts discover",
-    "seed-courses": "node src/cli/index.ts seed-courses"
+    "seed-courses": "node src/cli/index.ts seed-courses",
+    "sync": "node src/cli/index.ts sync",
+    "telegram-test": "node src/cli/index.ts telegram-test"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

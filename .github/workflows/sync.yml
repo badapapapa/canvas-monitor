@@ -1,0 +1,58 @@
+# Canvas sync. SPEC.md section 11; DECISIONS.md D-07, D-10, D-43.
+#
+# Adaptive cadence, expressed in UTC because Actions cron is UTC-only:
+#   every 20 min 08:00-22:40 SGT  ->  00:00-14:40 UTC
+#   hourly       23:00-07:00 SGT  ->  15:00-23:00 UTC
+# 54 runs/day. Unlimited minutes because this repository is public (D-10).
+#
+# Everything this job prints is public. Logs are redacted by default and
+# --unsafe-log is refused under CI; never add LOG_LEVEL=debug here.
+
+name: sync
+
+on:
+  schedule:
+    - cron: '*/20 0-14 * * *'
+    - cron: '0 15-23 * * *'
+  workflow_dispatch: {}
+
+# The real mutex (D-07). Queue, never cancel: a cancelled run mid-transaction
+# is safe, but a cancelled run mid-send is a lost-then-duplicated message.
+concurrency:
+  group: sync
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    # Shorter than the 15-minute sync_lock staleness window, so a hung run
+    # cannot outlive its own lock and let the next run overlap it (D-07).
+    timeout-minutes: 10
+    steps:
+      # Pinned to commit SHAs, not tags: this job holds the Turso credentials,
+      # and a public repo is exactly where a retagged upstream action would bite.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          # Native TypeScript type stripping; no build step (D-14).
+          node-version: 24
+          cache: npm
+
+      - name: Install runtime dependencies
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      - name: Sync
+        run: node src/cli/index.ts sync
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          # GitHub exposes which cron fired, not when it was meant to. The run
+          # reconstructs its slot from this to measure drift (D-43).
+          CRON_SCHEDULE: ${{ github.event.schedule }}

@@ -15,6 +15,7 @@ import { createLogger, type Logger } from './log.ts';
 import { readBootstrap, type Bootstrap } from './env.ts';
 import { systemClock, type Clock } from './clock.ts';
 import { differenceSeconds } from './time.ts';
+import { latestSlotAtOrBefore } from './cron.ts';
 import { messageOf, isAppError } from './errors.ts';
 
 export type RunStatus = 'ok' | 'partial' | 'failed';
@@ -32,6 +33,8 @@ export interface RunContext {
   readonly log: Logger;
   readonly db: Db;
   readonly bootstrap: Bootstrap;
+  /** The slot this run was scheduled for, when it was scheduled at all. */
+  readonly scheduledFor: Date | undefined;
 }
 
 export interface StartRunOptions {
@@ -58,6 +61,18 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
     unsafe: unsafeLog,
   }).child({ command: options.command, dry_run: options.dryRun });
 
+  // An explicit RUN_SCHEDULED_FOR wins; otherwise reconstruct the slot from the
+  // cron expression that fired. A lower bound once drift exceeds the cadence.
+  let scheduledFor = bootstrap.scheduledFor;
+  if (scheduledFor === undefined && bootstrap.cronSchedule !== undefined) {
+    try {
+      scheduledFor = latestSlotAtOrBefore(bootstrap.cronSchedule, startedAt) ?? undefined;
+    } catch {
+      scheduledFor = undefined; // a malformed expression must not stop a sync
+    }
+  }
+  const drift = scheduledFor === undefined ? null : differenceSeconds(startedAt, scheduledFor);
+
   const client = openClient(bootstrap);
   await enableForeignKeys(client);
   const db = createDb(client, log, options.dryRun);
@@ -68,6 +83,7 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
     dryRun: options.dryRun,
     unsafeLog,
     ci: bootstrap.ci,
+    scheduledFor,
     startedAt,
     clock,
     log,
@@ -75,8 +91,6 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
     bootstrap,
   };
 
-  const drift =
-    bootstrap.scheduledFor === undefined ? null : differenceSeconds(startedAt, bootstrap.scheduledFor);
 
   if (options.recordRun !== false) {
     await db.write.execute('open run', {
@@ -86,7 +100,7 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
         runId,
         options.command,
         options.dryRun ? 1 : 0,
-        bootstrap.scheduledFor?.toISOString() ?? null,
+        scheduledFor?.toISOString() ?? null,
         startedAt.toISOString(),
         drift,
         bootstrap.host,
@@ -95,7 +109,7 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
   }
 
   log.info('run.start', {
-    scheduled_for: bootstrap.scheduledFor?.toISOString() ?? null,
+    scheduled_for: scheduledFor?.toISOString() ?? null,
     drift_seconds: drift,
     host: bootstrap.host,
   });

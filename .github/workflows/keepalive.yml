@@ -1,0 +1,39 @@
+# Keep scheduled workflows alive. SPEC.md section 11.
+#
+# GitHub disables scheduled workflows in a repository with no activity for 60
+# days -- which is exactly what a finished, working system looks like, and
+# exactly when it would stop silently. Monthly, this pushes an empty commit if
+# the last commit is more than 45 days old. Busy months cost nothing.
+
+name: keepalive
+
+on:
+  schedule:
+    - cron: '17 3 1 * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 1
+
+      - name: Push an empty commit if the repository has gone quiet
+        run: |
+          last=$(git log -1 --format=%ct)
+          age_days=$(( ($(date +%s) - last) / 86400 ))
+          echo "Last commit was ${age_days} day(s) ago."
+          if [ "$age_days" -lt 45 ]; then
+            echo "Recent enough; nothing to do."
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit --allow-empty -m "keepalive: prevent scheduled workflows being disabled"
+          git push

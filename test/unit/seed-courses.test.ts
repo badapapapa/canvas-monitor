@@ -82,7 +82,7 @@ async function harness(contexts: SeedContext[]): Promise<{ ctx: RunContext; file
   await writeFile(file, JSON.stringify({ contexts }), 'utf8');
 
   const ctx = {
-    runId: 'test', command: 'seed-courses', dryRun: false, unsafeLog: false, ci: false,
+    runId: 'test', command: 'seed-courses', dryRun: false, unsafeLog: false, ci: false, scheduledFor: undefined,
     startedAt: clock.now(), clock, log: silentLogger(),
     db: createDb(client, silentLogger(), false),
     bootstrap: {} as RunContext['bootstrap'],

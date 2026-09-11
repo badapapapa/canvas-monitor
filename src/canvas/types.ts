@@ -100,3 +100,76 @@ export interface CanvasDiscussionTopic {
   delayed_post_at?: string | null;
   created_at?: string | null;
 }
+
+/**
+ * An announcement, from /announcements. Observed 2026-09-11: there is NO
+ * `updated_at` field at all, so an edit is only detectable by hashing the
+ * content (SPEC.md section 4). `context_code` says which course it came from
+ * when several are requested in one call.
+ */
+export interface CanvasAnnouncement {
+  id: number;
+  title?: string | null;
+  message?: string | null;
+  posted_at?: string | null;
+  delayed_post_at?: string | null;
+  created_at?: string | null;
+  context_code?: string | null;
+  html_url?: string | null;
+}
+
+/** One entry of an assignment's `all_dates`. Fields vary by permission. */
+export interface CanvasAssignmentDate {
+  id?: number | null;
+  base?: boolean | null;
+  title?: string | null;
+  due_at?: string | null;
+  lock_at?: string | null;
+  unlock_at?: string | null;
+}
+
+export interface CanvasAssignment {
+  id: number;
+  name?: string | null;
+  description?: string | null;
+  due_at?: string | null;
+  lock_at?: string | null;
+  unlock_at?: string | null;
+  points_possible?: number | null;
+  html_url?: string | null;
+  published?: boolean | null;
+  has_overrides?: boolean | null;
+  all_dates?: CanvasAssignmentDate[] | null;
+  updated_at?: string | null;
+}
+
+/**
+ * Submission comments. None existed on 2026-09-11, so this is typed from the
+ * Canvas documentation and the handling is unexercised against real data.
+ */
+export interface CanvasSubmissionComment {
+  id: number;
+  author_id?: number | null;
+  author_name?: string | null;
+  comment?: string | null;
+  created_at?: string | null;
+  edited_at?: string | null;
+}
+
+export interface CanvasSubmission {
+  id: number;
+  assignment_id: number;
+  user_id?: number | null;
+  workflow_state?: string | null;
+  score?: number | null;
+  grade?: string | null;
+  excused?: boolean | null;
+  /**
+   * NULL while a grade is held under a manual posting policy. Observed live on
+   * 2026-09-11: `workflow_state: graded` with `posted_at: null` and
+   * `score: null`. A grade is announced only once this is set.
+   */
+  posted_at?: string | null;
+  graded_at?: string | null;
+  submission_comments?: CanvasSubmissionComment[] | null;
+}

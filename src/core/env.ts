@@ -27,6 +27,12 @@ export interface Bootstrap {
   ci: boolean;
   /** Set by the scheduler; lets a run measure its own queue drift. */
   scheduledFor: Date | undefined;
+  /**
+   * The cron expression that fired this run (`github.event.schedule`). GitHub
+   * does not expose the scheduled TIME, so the run reconstructs its slot from
+   * this -- see core/cron.ts for why that is a lower bound on drift.
+   */
+  cronSchedule: string | undefined;
   host: string;
 }
 
@@ -65,6 +71,7 @@ export function readBootstrap(env: NodeJS.ProcessEnv = process.env): Bootstrap {
     logLevel: parseLevel(env['LOG_LEVEL']),
     ci: env['CI'] === 'true' || env['CI'] === '1' || env['GITHUB_ACTIONS'] === 'true',
     scheduledFor,
+    cronSchedule: env['CRON_SCHEDULE']?.trim() === '' ? undefined : env['CRON_SCHEDULE']?.trim(),
     host: env['GITHUB_RUN_ID'] === undefined ? 'local' : `gha:${env['GITHUB_RUN_ID']}`,
   };
 }

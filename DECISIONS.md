@@ -76,7 +76,7 @@ overlap in the original algorithm is now meaningless except for
 
 ---
 
-## D-04 — Per-item notification marks; delivery is at-least-once · specified (Phase 2)
+## D-04 — Per-item notification marks; delivery is at-least-once · applied (Phase 2), amended
 
 **Was:** `notifications.batch_key UNIQUE` as the idempotency mechanism.
 **Now:** `batch_key = hash(sorted item ids)`; the row is inserted `queued`
@@ -91,6 +91,16 @@ design states at-least-once delivery and bounds the duplicate to one message
 rather than one batch.
 
 **Cost:** written down plainly in SPEC §12 rather than implied.
+
+**Amended 2026-09-11, before any code shipped — the key above was wrong.**
+`hash(sorted item ids)` collides when the *same* item changes twice: an
+assignment whose due date moves again has the same id both times, so its second
+change would hit the UNIQUE constraint and be **silently dropped**. The
+database-level idempotency would itself produce the silent loss it exists to
+prevent. The key is `hash(sorted (item_id, content_hash) pairs)`: a retry of
+identical content still collides, a genuinely new change does not. Pinned by an
+end-to-end test that moves one due date twice, and verified to fail when the
+content version is removed from the key.
 
 ---
 
@@ -375,7 +385,7 @@ guesses.
 
 ---
 
-## D-13 — Section overrides: reframed, pending evidence · open
+## D-13 — Section overrides: reframed, pending evidence · open (unexercised: no overrides exist)
 
 **Was:** "the highest-consequence inaccuracy in the system", implying a
 resolution problem.
@@ -395,6 +405,21 @@ warns on disagreement. Until then, showing both dates with a warning stands.
 **Why:** an inflated warning in a spec is its own kind of inaccuracy. Better to
 mark it open than to leave a confident claim that may be wrong in either
 direction.
+
+**Evidence, 2026-09-11 — the fixture could not be captured, because nothing
+exists to capture.** Across all 8 assignments in my 3 enabled courses:
+`has_overrides` was never true, `all_dates` never had more than one entry, and it
+always agreed with `due_at`. With every module on a single Canvas site (Phase 1
+observation), there are no sections for dates to differ between.
+
+**What was built, and what was not.** No resolver — there is nothing to resolve,
+and building one against no data would be exactly the inference SPEC §17
+forbids. Instead a **cross-check**: if `all_dates` ever lists a date that
+disagrees with `due_at`, the notification shows both with "Check which applies
+to you". That is correct whichever way the belief above turns out.
+
+**Stays open** until an override actually appears. When one does, capture it,
+promote a redacted fixture, and rewrite SPEC §4 again from what it shows.
 
 ---
 
@@ -967,3 +992,111 @@ contexts and item counts, so the silence is explained rather than mysterious.
 vouch for it. Operational alerts (a 401, a stale context, an unverified empty
 announcements result under D-38) are never silenced by `silent_sync`, because
 those describe the system's health, not content I have already seen.
+
+
+---
+
+## D-42 — Alerts page once; ops is silent at night, not held · applied
+
+**Desired-state reconciliation.** Each run computes every alert condition that
+is currently true; the difference from `ops_alerts` drives the sends — raise
+when a condition becomes true, remind at most every 6h (critical) or 24h (warn)
+while it stays true, announce "resolved" when it clears. A condition that could
+not be *evaluated* this run is never resolved: if Canvas auth failed, staleness
+was not assessed, so a stale-course alert must not be declared fixed.
+
+**Why:** the naive design pages on every run of a known outage — every 20
+minutes. A bot that does that gets muted, and a muted ops chat is the silent
+failure SPEC §2.1 forbids. Verified end to end: a 401 pages once, stays quiet
+across a second failing run, and sends one "Resolved" when auth returns.
+
+**Ladders.** Token expiry is one family of rungs (`token_expiry@14`, `@7`, `@3`,
+`@1`, `@expired`). Climbing a rung resolves the previous one silently; only
+clearing the whole family (rotating the token) announces "resolved". Otherwise
+crossing T−7 would send "Resolved: expires in 14 days" beside "expires in 7".
+Rungs never remind, except `@expired`, because nothing works until it is fixed.
+
+**Quiet hours for ops: silent, not held.** Content is held to a morning digest,
+as specified. Operational alerts are delivered immediately with
+`disable_notification` — on the phone when I wake, never waking me. Holding them
+would make a 02:00 outage message five hours stale on arrival; sending them with
+sound would get the ops chat muted in week one.
+
+---
+
+## D-43 — Drift is a lower bound; skipped runs are measured as gaps · applied
+
+GitHub gives a scheduled run the cron expression that fired
+(`github.event.schedule`), never the time it was meant for. The run
+reconstructs its slot as the latest matching minute at or before its start.
+
+**Known limit:** delayed by more than one cadence interval, the latest matching
+slot is a *later* slot than the one that fired — a run meant for 04:00 that
+starts at 04:25 is credited to 04:20, recorded as 5 minutes late. So
+`drift_seconds` is exact below the cadence and a **lower bound** above it. A test
+pins the limit so nobody later reads the column as exact.
+
+**Compensation:** dropped runs are measured separately, as the gap between
+consecutive scheduled runs in `runs`. The `schedule_health` alert fires on drift
+over 60 min or a gap over 3 h. The Phase 2 review should read both columns.
+
+---
+
+## D-44 — The one blind spot needs an external dead-man's switch · applied, optional
+
+Every alert in this system is sent *by a run*. If runs stop — the workflow
+auto-disabled, an Actions outage, schedules silently dropped — nothing is left
+to notice. That is the single case SPEC §2.1 cannot cover from the inside.
+
+**Built:** an optional `healthcheck_url` config key. When set, each sync pings
+`/start`, then success or `/fail`, never throwing and never delaying a run by
+more than 5 seconds. An external service (healthchecks.io is free for this)
+alerts when pings stop.
+
+**Recommended, not required.** It adds a third-party service, which is my call.
+Suggested check: period 1 hour, grace 2 hours — matching the 3-hour gap alert,
+so the switch fires only when the in-band alert cannot.
+
+---
+
+## D-45 — Phase 2 as built: observations, delivery and failure policy · applied
+
+**Observed on the live instance, 2026-09-11, recorded so the code is trusted for
+the right reasons:**
+
+- Announcements carry **no `updated_at`**; edits are detected by content hash.
+- A **graded-but-unposted** submission exists (`graded`, `posted_at: null`,
+  `score: null`). Grades notify on posting, never on grading.
+- **No submission comments and no delayed posts exist yet.** Both are handled
+  to the documented shape and covered by synthetic tests, but are
+  **unexercised** against real data — like the modules fallback (D-33).
+- The rate limiter still read 700 after 9 requests at ~0.55 cost each. A Phase 2
+  run is ~7 requests; the bucket is not a constraint at this scale (D-31).
+
+**Verified end to end against real Canvas** on a throwaway local replica
+(real courses, fake Telegram, deleted afterwards): the first run baselined 38
+items across 3 courses and sent one "Now watching" summary with zero alerts; a
+repeat run sent nothing; simulated changes produced a correct due-date-change
+message and a real announcement preview. The replica also caught two defects
+before they reached a real message: wrong plurals, and a summary that counted
+unsubmitted and held submissions as "grades" (it now counts only posted ones).
+
+**Delivery.** Items link to Canvas inline (`<a href>`), not as inline buttons:
+buttons are for OneDrive `webUrl`s in Phase 4, and a batch of ten items with ten
+buttons is unreadable. Instructor HTML is reduced to plain text and escaped
+again on output, so it cannot inject markup; DOMPurify is deferred to Phase 8,
+where HTML is actually rendered.
+
+**Failure policy.** `partial` (some courses failed, others committed) exits 0;
+per-course staleness alerts carry it. A run that cannot deliver at all exits 1,
+so GitHub's failure email becomes the escape hatch when Telegram is what broke.
+Raw capture is disabled under CI: the runner's disk is discarded, and it is one
+less place real responses could sit.
+
+**Tooling defect found and fixed in passing.** Several earlier SPEC.md edits
+had silently not landed — the editing script replaced text without checking the
+target existed, so a mismatch did nothing and said nothing. Four Phase 1
+corrections were missing from SPEC.md (including the corrected module-code
+regex, D-35), though DECISIONS.md had them all. Found by auditing every intended
+edit against the file; all edits now go through a helper that fails unless the
+target occurs exactly once.

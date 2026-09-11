@@ -79,6 +79,11 @@ const IDENTITY_KEYS = new Set([
 const BODY_KEYS = new Set([
   'body',
   'message',
+  // Rendered Telegram payloads. The message text is the whole point of the
+  // bot and must never reach a public Actions log.
+  'text',
+  'html',
+  'caption',
   'description',
   'body_text',
   'syllabus_body',
@@ -92,6 +97,13 @@ const EMAIL_RE = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
 const NUSID_RE = /\bA\d{7}[A-Z]\b/g;
 /** Anything that looks like a bearer token or Canvas access token. */
 const TOKEN_RE = /\b\d{3,6}~[A-Za-z0-9]{20,}\b/g;
+/**
+ * Telegram bot tokens. Deliberately NO leading word boundary: the token sits
+ * inside the Bot API URL as `/bot<digits>:<secret>/`, where "bot" and the digits
+ * are both word characters, so a boundary-anchored pattern never matches the
+ * one place the token actually appears -- a fetch error quoting the URL.
+ */
+const TELEGRAM_TOKEN_RE = /\d{5,15}:[A-Za-z0-9_-]{30,}/g;
 
 export interface RedactOptions {
   /** Keep free-text bodies. Only ever true under --unsafe-log, never in CI. */
@@ -105,6 +117,7 @@ export interface RedactOptions {
 export function scrubString(input: string): string {
   return input
     .replace(TOKEN_RE, '[token]')
+    .replace(TELEGRAM_TOKEN_RE, '[token]')
     .replace(EMAIL_RE, '[email]')
     .replace(NUSID_RE, '[nusid]');
 }

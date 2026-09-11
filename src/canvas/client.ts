@@ -10,6 +10,9 @@
 import type { CanvasHttp } from './http.ts';
 import type { Result } from '../core/result.ts';
 import type {
+  CanvasAnnouncement,
+  CanvasAssignment,
+  CanvasSubmission,
   CanvasCourse,
   CanvasDiscussionTopic,
   CanvasEnrollment,
@@ -110,4 +113,51 @@ export class CanvasClient {
       only_announcements: true,
     });
   }
+
+  // --- Phase 2 ingest ------------------------------------------------------
+
+  /**
+   * Announcements for many courses at once, chunked at 10 context codes per
+   * request. D-30 established the cap is at least 8 and could not reach 10;
+   * chunking at 10 is correct whichever it turns out to be.
+   *
+   * COURSE codes only: /announcements rejects `group_N` with a 400 (D-29).
+   * Group announcements come from discussion_topics in Phase 3.
+   *
+   * Returns one Result per chunk, not a merged list: a failed chunk must fail
+   * only the contexts in it (SPEC.md section 2.6), and a caller merging chunks
+   * could not tell which contexts an error belonged to.
+   */
+  async listAnnouncements(
+    courseIds: readonly number[],
+    window: { start: string; end: string },
+  ): Promise<Array<{ courseIds: number[]; result: Result<CanvasAnnouncement[]> }>> {
+    const out: Array<{ courseIds: number[]; result: Result<CanvasAnnouncement[]> }> = [];
+    for (let i = 0; i < courseIds.length; i += ANNOUNCEMENT_CHUNK) {
+      const chunk = courseIds.slice(i, i + ANNOUNCEMENT_CHUNK);
+      const result = await this.http.list<CanvasAnnouncement>('/announcements', {
+        'context_codes[]': chunk.map((id) => `course_${id}`),
+        start_date: window.start,
+        end_date: window.end,
+      });
+      out.push({ courseIds: chunk, result });
+    }
+    return out;
+  }
+
+  listAssignments(courseId: number): Promise<Result<CanvasAssignment[]>> {
+    return this.http.list<CanvasAssignment>(`/courses/${courseId}/assignments`, {
+      'include[]': ['all_dates', 'submission'],
+    });
+  }
+
+  listSubmissions(courseId: number): Promise<Result<CanvasSubmission[]>> {
+    return this.http.list<CanvasSubmission>(`/courses/${courseId}/students/submissions`, {
+      'student_ids[]': ['self'],
+      'include[]': ['submission_comments'],
+    });
+  }
 }
+
+/** DECISIONS.md D-30: safe whether the true cap is 10 or higher. */
+export const ANNOUNCEMENT_CHUNK = 10;

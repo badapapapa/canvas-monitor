@@ -19,12 +19,14 @@ import { readBootstrap } from '../core/env.ts';
 import { createLogger } from '../core/log.ts';
 import { systemClock } from '../core/clock.ts';
 import { AppError, isAppError, messageOf } from '../core/errors.ts';
-import { finishRun, startRun, type RunContext } from '../core/run-context.ts';
+import { finishRun, startRun, type RunContext, type RunStatus } from '../core/run-context.ts';
 import { Config } from '../core/config.ts';
 import { pruneRawCaptures } from '../canvas/raw-store.ts';
 import { runProbe } from './probe.ts';
 import { runDiscoverCommand } from './discover.ts';
 import { runSeedCourses } from './seed-courses.ts';
+import { runSyncCommand } from './sync.ts';
+import { runTelegramTest } from './telegram-test.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
 const USAGE = `
@@ -37,6 +39,8 @@ Commands:
   probe                    Validate the Canvas token and list active courses.
   discover                 Probe coverage and write courses.seed.json for review.
   seed-courses [path]      Load the reviewed seed file into contexts and courses.
+  sync                     One polling run: ingest, alert, deliver. --dry-run previews messages.
+  telegram-test            Send a test message to both Telegram chats.
   set-config <key>         Set a config value, read from stdin (never argv).
   config-list              Show config keys and whether they are set.
   prune-raw                Delete raw captures past their retention window.
@@ -129,6 +133,12 @@ async function main(argv: string[]): Promise<number> {
           overwrite: values.overwrite === true,
         }),
       );
+    case 'sync':
+      return await withRun('sync', dryRun, unsafeLog, async (ctx) =>
+        runSyncCommand(ctx, { json: values.json === true }),
+      );
+    case 'telegram-test':
+      return await withRun('telegram-test', dryRun, unsafeLog, async (ctx) => runTelegramTest(ctx));
     case 'seed-courses':
       return await withRun('seed-courses', dryRun, unsafeLog, async (ctx) => {
         await runSeedCourses(ctx, { path: positionals[1] });
@@ -205,16 +215,17 @@ async function withRun(
   command: string,
   dryRun: boolean,
   unsafeLog: boolean,
-  body: (ctx: RunContext) => Promise<number>,
+  body: (ctx: RunContext) => Promise<number | { code: number; status: RunStatus }>,
 ): Promise<number> {
   let ctx: RunContext | undefined;
   try {
     ctx = await startRun({ command, dryRun, unsafeLog });
-    const code = await body(ctx);
-    // 'partial' is reserved for Phase 2 onward, where one course can fail while
-    // the others commit normally (SPEC.md section 7). A Phase 0 command either
-    // did its job or did not.
-    await finishRun(ctx, code === 0 ? 'ok' : 'failed');
+    const result = await body(ctx);
+    // Most commands either did their job or did not. `sync` reports its own
+    // status, because one course can fail while the others commit normally
+    // (SPEC.md section 7) -- that is 'partial', and it still exits 0.
+    const { code, status } = typeof result === 'number' ? { code: result, status: (result === 0 ? 'ok' : 'failed') as RunStatus } : result;
+    await finishRun(ctx, status);
     return code;
   } catch (error) {
     if (ctx !== undefined) {

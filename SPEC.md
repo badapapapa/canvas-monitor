@@ -150,7 +150,8 @@ A 401 is never retried. A dead token does not recover by waiting.
   `/pages` and `/discussion_topics` accept no incremental parameter. Full
   listings are fetched every run and diffed client-side against the stored
   `updated_at`. See §7 for what this means for watermarks. `/files` supports
-  `sort=updated_at&order=desc`, so pagination can stop at the first item older
+  `sort=updated_at&order=desc` — **verified 2026-09-10** against a real course,
+  results newest-first (DECISIONS.md D-32) — so pagination can stop at the first item older
   than the watermark; `/pages` returns `updated_at` in the list, so page bodies
   are fetched only for pages that actually changed (the list carries no `body`,
   and fetching every page every run is an N+1 the rate limiter cannot absorb).
@@ -165,23 +166,39 @@ A 401 is never retried. A dead token does not recover by waiting.
   semester and look complete. Always pass dates. It filters on `posted_at` only,
   so an announcement **edited** outside the window is invisible to it — the
   weekly reconciliation (§7) is what catches those.
-- **`/announcements` accepts at most 10 `context_codes[]` per request.** Chunk.
-  With lecture and tutorial sites, five modules already exceeds it.
+- **`/announcements` accepts COURSE context codes only.** Verified 2026-09-10:
+  `context_codes[]=group_N` returns `400 {"message":"Invalid context_codes; only
+  \`course\` codes are supported"}`. Group announcements come from
+  `/groups/:id/discussion_topics?only_announcements=true`, which works
+  (DECISIONS.md D-29). It is a **400**, not a 404: a malformed request, not a
+  permission answer, and it must never be recorded as reduced coverage.
+- **`/announcements` chunking.** The assumed cap of 10 `context_codes[]` could not
+  be reached: 8 codes were accepted, and I have only 8 course contexts
+  (DECISIONS.md D-30, bounded only). Chunk at 10 regardless — it is correct
+  whether the real cap is 10 or higher.
 - **Announcements have `delayed_post_at`.** `created_at` and `posted_at`
   diverge. Order and watermark on `posted_at`.
-- **Assignments support per-section overrides.** `include[]=overrides` requires
-  instructor permissions I do not have. On a student token Canvas is believed to
-  resolve `due_at` to my own override already, and `all_dates` entries are
-  believed to be titled with section *names* rather than carrying a
-  `course_section_id` — which would make an ID match impossible.
-  **This is an assumption, not a finding.** Before writing any resolver,
-  capture a fixture in Phase 2 from an assignment known to have section-specific
-  dates, then rewrite this paragraph to describe what actually happens. If
-  `due_at` proves reliable, the resolver is a cross-check that warns on
-  disagreement, not a resolution mechanism. Until then: where the two disagree,
-  **display both dates with a warning — do not guess.**
+- **Assignments support per-section overrides — and none exist in my
+  enrolment.** Observed 2026-09-11 across all 8 assignments in 3 courses:
+  `has_overrides` never true, `all_dates` never more than one entry, always equal
+  to `due_at`. Every module is a single Canvas site, so there are no sections for
+  dates to differ between. `include[]=overrides` needs instructor permissions I
+  do not have.
+
+  So there is **no resolver** — building one against no data would be pure
+  inference. There is a **cross-check**: if `all_dates` ever disagrees with
+  `due_at`, the notification shows both dates with a warning and never picks
+  one. The belief that a student token's `due_at` is already self-resolved is
+  **still unverified**, and stays marked so until a real override appears
+  (DECISIONS.md D-13).
 - **Grades can be graded-but-unposted** under a manual posting policy. Check
-  `posted_at` on the submission before showing a score.
+  `posted_at` on the submission before showing a score. **Observed live
+  2026-09-11:** a submission with `workflow_state: graded`, `posted_at: null`,
+  `score: null`. A grade is notified only when `posted_at` becomes set, never on
+  `graded` alone — that would say "graded" and then withhold the score.
+- **Announcements have no `updated_at` field at all** (observed 2026-09-11). An
+  edit is detectable only by hashing title and body, which is what `content_hash`
+  does.
 - **File `url` fields carry a time-limited verifier token.** Never persist them.
   Re-fetch the file object immediately before downloading. The verifier — not
   the bearer token — is what authorises the storage host; see §5.
@@ -288,8 +305,11 @@ courses (
 )
 
 watermarks (
-  context_id INTEGER, resource_type TEXT,
-  last_seen_max_ts TEXT, last_run_at TEXT, last_status TEXT,
+  context_id INTEGER, resource_type TEXT,   -- announcement | assignment | grade | comment
+  last_seen_max_ts TEXT, last_run_at TEXT,
+  last_status TEXT,            -- ok | denied_or_absent | error | unverified (D-38)
+  last_ok_at TEXT,             -- drives the 24h staleness alert
+  baselined_at TEXT,           -- silent_sync (D-41): NULL means next success is a baseline
   PRIMARY KEY (context_id, resource_type)
 )
 
@@ -297,9 +317,12 @@ items (                        -- announcements, assignments, pages, comments
   id TEXT PRIMARY KEY,         -- hash of (context_id, resource_type, external_id)
   context_id INTEGER, resource_type TEXT, external_id TEXT,
   title TEXT, body_text TEXT, body_hash TEXT,
-  canvas_url TEXT, posted_at TEXT, updated_at_canvas TEXT,
-  first_seen_at TEXT, notified_at TEXT,
-  state TEXT                   -- new | seen | revised | deleted_upstream
+  canvas_url TEXT, posted_at TEXT, updated_at_canvas TEXT, due_at TEXT,
+  content_hash TEXT,           -- only the fields whose change is worth a message
+  meta TEXT,                   -- JSON, resource-specific
+  first_seen_at TEXT, last_seen_at TEXT, revised_at TEXT, notified_at TEXT,
+  state TEXT,                  -- new | seen | revised | deleted_upstream
+  UNIQUE (context_id, resource_type, external_id)
 )
 
 files (
@@ -337,10 +360,21 @@ config (key TEXT PRIMARY KEY, value TEXT, secret INTEGER, updated_at TEXT)
 
 notifications (
   id INTEGER PRIMARY KEY,
-  batch_key TEXT UNIQUE,       -- hash of the sorted item ids in the batch
-  state TEXT,                  -- queued | sent | suppressed
+  batch_key TEXT UNIQUE,       -- hash of sorted (item_id, content_hash) pairs (D-04)
+  channel TEXT,                -- content | ops
+  context_id INTEGER,
+  state TEXT,                  -- queued | sent | suppressed | failed
+  urgent INTEGER,              -- a deadline inside 12h: overrides quiet hours
   release_after TEXT,          -- quiet-hours hold; there is no process to hold it in
-  sent_at TEXT, payload TEXT
+  created_at TEXT, sent_at TEXT, attempts INTEGER, last_error TEXT,
+  item_ids TEXT, payload TEXT  -- payload is rendered at SEND time, so held items merge
+)
+
+ops_alerts (                   -- one page per outage, not one per run (D-42)
+  alert_key TEXT PRIMARY KEY,  -- `family@rung` marks a ladder, e.g. token_expiry@7
+  severity TEXT, summary TEXT,
+  first_raised_at TEXT, last_raised_at TEXT, last_sent_at TEXT, resolved_at TEXT,
+  occurrences INTEGER
 )
 
 groups (                       -- one row per group context (D-37)
@@ -600,6 +634,26 @@ Caveats to handle explicitly:
   table, from Phase 0 onward. The Phase 2 review decides on numbers, not
   impressions.
 - `concurrency:` group plus `timeout-minutes: 10` — see §7.
+- **Drift is measured from the cron expression that fired.** GitHub exposes
+  which schedule fired, never when it was meant to run, so the run reconstructs
+  its slot as the latest matching minute before it started. Once drift exceeds
+  the cadence that reconstruction picks a *later* slot, so recorded drift is a
+  **lower bound**; skipped runs are measured separately, as gaps between
+  consecutive runs (DECISIONS.md D-43). A run more than 60 min late, or a gap over
+  3 hours, raises a `schedule_health` alert.
+- **Actions are pinned to commit SHAs**, not tags. The job holds the Turso
+  credentials, and a public repository is where a retagged upstream action
+  would bite.
+- **Dead-man's switch (optional, recommended).** Every alert is sent by a run, so
+  if runs stop entirely nothing is left to notice — the one case §2.1 cannot
+  otherwise cover. Setting `healthcheck_url` (e.g. healthchecks.io) pings start,
+  success and failure each run, and the external service alerts when pings stop
+  (DECISIONS.md D-44).
+- **Exit codes:** a run where some courses failed but others committed is
+  `partial` and exits 0 — per-course staleness alerts cover it, and a red cross
+  every 20 minutes would train me to ignore red crosses. A run that could not
+  deliver notifications at all exits 1, so GitHub's own failure email is the
+  escape hatch when Telegram itself is the thing that broke.
 
 ### Revisit at the Phase 2 review
 
@@ -649,6 +703,15 @@ BT2102 — 3 new files
   There is no long-lived process to hold a message in memory. Override for
   genuinely urgent items only (a deadline inside 12 hours). If the first week of
   use wakes me twice, I will mute this and the project dies.
+- **Operational alerts are never held, but are silent at night** (DECISIONS.md
+  D-42). During quiet hours they are delivered with `disable_notification`: on
+  the phone when I wake, never waking me. Content is held; ops is not, because an
+  outage message that arrives at 07:00 is five hours stale.
+- **An alert pages once, not every run.** Alerts are reconciled as desired
+  state: raised when a condition becomes true, reminded on a slow cadence (6h
+  critical, 24h warn) while it stays true, and announced as resolved when it
+  clears. Token expiry is a ladder — crossing from T−14 to T−7 is a climb, not a
+  recovery, and sends no "resolved".
 - Operational failures go to a **second Telegram chat ID**, not a forum topic —
   simpler, and failures never get lost in file noise. Distinct alerts for: 401
   from Canvas, Graph auth failure, storage above 80%, a context stale for more
@@ -661,8 +724,10 @@ Delivery is **at-least-once**. Telegram can accept a message and the process can
 die before the database records it; nothing can close that window entirely. What
 must be bounded is its width:
 
-- `batch_key = hash(sorted item ids)` — deterministic, so a retried run collides
-  with the batch it already sent instead of minting a new key.
+- `batch_key = hash(sorted (item_id, content_hash) pairs)` — deterministic, so a
+  retried run collides with the batch it already sent, **and** content-versioned,
+  so the same item changing twice is two notifications. An id-only key would
+  silently swallow the second due-date change (DECISIONS.md D-04, amended).
 - The `notifications` row is inserted as `queued` **before** the send and marked
   `sent` after.
 - `items.notified_at` / `files.notified_at` are written in the same transaction
@@ -839,8 +904,15 @@ Do not ask me for my module list. Build `npm run discover` as part of Phase 1:
 3. Also probe `/courses?enrollment_state=completed` and record what is
    reachable — Phase 6's pattern tuning depends on it.
 4. Propose a `module_code` per course by extracting the NUS module pattern
-   (`[A-Z]{2,3}\d{4}[A-Z]?`) from the course code or name — but treat this as a
-   suggestion only.
+   **`\b[A-Z]{2,4}\d{4}[A-Z]?\b`** from the course code or name — but treat
+   this as a suggestion only.
+
+   **The originally specified `[A-Z]{2,3}\d{4}[A-Z]?` is wrong** (DECISIONS.md
+   D-35). NUS uses four-letter prefixes (the GESS and GEXS families), and against
+   such a code the three-letter form does not fail — it silently matches one
+   character in, `ABCD1234` becoming `BCD1234`. The `\b` anchors matter as much as
+   the `{2,4}`. A wrong module code becomes a wrong OneDrive folder, fixed at
+   first sight by route-once.
 5. Detect likely lecture/tutorial/common site groupings by matching on the
    extracted module code, and flag suspected pairs.
 
@@ -855,7 +927,7 @@ Do not ask me for my module list. Build `npm run discover` as part of Phase 1:
    that §5's path sanitising would strip anyway.
 
    Course names prefix the module code, including combined offerings such as
-   `ABC1001/ABD1002`. The `[A-Z]{2,3}\d{4}[A-Z]?` extractor matches only the
+   `ABC1001/ABD1002`. A single-code extractor matches only the
    first code of such a pair, and which one I enrolled under is not inferable
    from the course object. Surface both and let me choose.
 6. Seed group contexts from `/users/self/groups`. Canvas names each group's

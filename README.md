@@ -21,9 +21,11 @@ Single user. No accounts, no sharing, no dashboard before Phase 8.
 - [`DECISIONS.md`](DECISIONS.md) — every deviation from the original draft, with
   reasoning.
 
-**Current phase: 0.** Repo, config table, contexts schema, Canvas client
-(pagination, rate limiting, three-state errors), raw capture, run
-instrumentation, `--dry-run`. Done when `npm run probe` lists my courses.
+**Current phase: 2 — built, not yet running on a schedule.** Phases 0 and 1
+are done: Canvas client, course discovery, reviewed seed. Phase 2 polls
+announcements, assignments, grades and feedback and notifies via Telegram; no
+downloading yet. Done when it has run for a week and the alerts feel correct and
+timely. The archive deadline that shapes the next phases is in DECISIONS.md D-36.
 
 ---
 
@@ -98,6 +100,10 @@ deliverable.
 | `npm run set-config <key>` | Set a config value, read from stdin. |
 | `npm run config-list` | Show config keys and whether they are set (secrets masked). |
 | `npm run prune-raw` | Delete raw captures past their retention window. |
+| `npm run discover` | Probe coverage and write `courses.seed.json` for review. Refuses to overwrite without `--overwrite`. |
+| `npm run seed-courses` | Load the reviewed seed file. Idempotent; rejects an enabled course with no module code. |
+| `npm run telegram-test` | Send one test message to each Telegram chat. |
+| `npm run sync` | One polling run. `-- --dry-run` previews the messages it would send. |
 | `npm run check` | Typecheck and run the test suite. |
 
 Every command accepts `--dry-run`: all reads happen, every intended write is
@@ -113,6 +119,28 @@ npm run probe -- --dry-run --json
 ```
 
 ---
+
+## Going live (Phase 2)
+
+In this order — each step is safe to stop after.
+
+1. **Telegram config**, each read from stdin:
+   `npm run set-config telegram_bot_token`, then `telegram_content_chat_id`,
+   then `telegram_ops_chat_id` (the group; its id is negative).
+2. **`npm run migrate`** — adds the Phase 2 tables. Additive only.
+3. **`npm run telegram-test`** — one message lands in each chat.
+4. **`npm run sync -- --dry-run`** — reads real Canvas, writes and sends nothing,
+   prints what it would send. On the first run that is one "Now watching"
+   summary: everything already posted is recorded as seen, not notified
+   (`silent_sync`, DECISIONS.md D-41).
+5. **`npm run sync`** — the real first run. Expect exactly one message.
+6. **Publish and schedule.** Create the public GitHub repository, enable secret
+   scanning with push protection, add `TURSO_DATABASE_URL` and
+   `TURSO_AUTH_TOKEN` as Actions secrets, and push. The `sync` workflow then
+   runs 54 times a day.
+7. *(Recommended)* **Dead-man's switch.** Create a healthchecks.io check —
+   period 1 hour, grace 2 hours — and `npm run set-config healthcheck_url`. It is
+   the only thing that notices if runs stop altogether (DECISIONS.md D-44).
 
 ## Privacy posture
 

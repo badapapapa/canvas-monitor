@@ -76,6 +76,14 @@ export const CONFIG_SPEC = {
     pattern: /^-?\d{1,20}$/,
     formatHint: 'an integer; a group chat id is negative, often starting -100',
   },
+  healthcheck_url: {
+    secret: true,
+    description:
+      'Optional dead-man\'s switch ping URL (e.g. healthchecks.io). The only way to learn that runs have STOPPED.',
+    envVar: 'HEALTHCHECK_URL',
+    pattern: /^https:\/\/\S+$/,
+    formatHint: 'an https:// URL',
+  },
 } as const satisfies Record<string, KeySpec>;
 
 export type ConfigKey = keyof typeof CONFIG_SPEC;
