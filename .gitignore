@@ -1,0 +1,28 @@
+node_modules/
+dist/
+.env
+.env.local
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Raw Canvas captures. These contain third-party personal data (other students'
+# names and emails in discussion topics and submission comments). They are
+# redacted on write, but they never belong in version control. Enforced by
+# .githooks/pre-commit -- see SPEC.md section 15 and DECISIONS.md D-11.
+var/
+
+# Local diagnostic output and the seed file. All three contain real module
+# codes, real Canvas course ids, and my canvas_user_id. This repository is
+# public (DECISIONS.md D-10), so none of them may be committed -- not even
+# "just this once", because git history is not retractable.
+#
+# To share one of these safely, redact it and promote it to test/fixtures/
+# under the policy in test/fixtures/README.md.
+probe-*.txt
+probe-*.log
+discover-*.txt
+discover-*.log
+courses.seed.json

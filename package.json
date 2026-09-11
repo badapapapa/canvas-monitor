@@ -1,0 +1,30 @@
+{
+  "name": "canvas-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Canvas LMS monitor: polls Canvas, archives to OneDrive, notifies via Telegram.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "migrate": "node src/cli/index.ts migrate",
+    "probe": "node src/cli/index.ts probe",
+    "set-config": "node src/cli/index.ts set-config",
+    "config-list": "node src/cli/index.ts config-list",
+    "prune-raw": "node src/cli/index.ts prune-raw",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/unit/*.test.ts",
+    "check": "npm run typecheck && npm run test",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "discover": "node src/cli/index.ts discover",
+    "seed-courses": "node src/cli/index.ts seed-courses"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.15.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

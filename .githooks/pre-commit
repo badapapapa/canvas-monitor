@@ -1,0 +1,6 @@
+#!/bin/sh
+# Install with: npm run hooks:install
+set -eu
+dir=$(dirname "$0")/../scripts
+"$dir/check-no-captures.sh"
+"$dir/scan-secrets.sh"
