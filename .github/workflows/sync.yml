@@ -34,12 +34,14 @@ jobs:
     steps:
       # Pinned to commit SHAs, not tags: this job holds the Turso credentials,
       # and a public repo is exactly where a retagged upstream action would bite.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # v5 of both actions runs on the node24 runtime; v4 ran on node20, which
+      # GitHub is deprecating and which annotated every run.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           # Native TypeScript type stripping; no build step (D-14).
           node-version: 24
