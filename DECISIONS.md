@@ -827,6 +827,27 @@ weeks of margin, not days:
 
 If Phase 2 or 3 overruns, cut scope from them — never from Phase 4's date.
 
+**Priority rule, stated 2026-09-12.** Phase 4 is the feature this project was
+started for. The original problem is finding out on tutorial day that a
+*document* appeared four days earlier; Phase 2 is useful, but it is not that.
+So during the observation week and Phase 3: **fix what is actually broken and
+leave the rest.** Polish, nice-to-haves and scope growth come out of Phase 4's
+time, and that time is spent.
+
+**One distinction worth keeping straight when cutting.** SPEC §1 says "file
+management is secondary" — that means *routing and versioning* (Phases 5 and 7),
+not files. Splitting the want across the phases that deliver it:
+
+| Want | Phase |
+|---|---|
+| Find out a file appeared, on the day | 3 — detection and notification |
+| Still have it once the course concludes | 4 — the archive, deadline 2027-01-09 |
+| Have it filed tidily | 5 and 7 — genuinely secondary |
+
+So when Phase 3 is trimmed, trim the group and modules-fallback polish, not file
+detection itself: that half is the deliverable too, and it is the half that
+directly answers the sentence the project opened with.
+
 **Prior-term backfill — decided 2026-09-11: yes, as a one-off command.** The
 prior-term course above is readable today and may not be later, and taking
 what is still available is the archive's whole purpose. It is archived by a
