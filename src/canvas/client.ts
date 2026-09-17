@@ -17,6 +17,7 @@ import type {
   CanvasDiscussionTopic,
   CanvasEnrollment,
   CanvasFile,
+  CanvasFolder,
   CanvasGroup,
   CanvasModule,
   CanvasUser,
@@ -151,6 +152,26 @@ export class CanvasClient {
     });
   }
 
+  // --- Phase 3 file detection ----------------------------------------------
+
+  /**
+   * Every file, every run. No early stop on updated_at (D-32 deferred, D-47):
+   * at observed sizes this is one page per course, and stopping at an old
+   * updated_at would miss a file published without that timestamp moving.
+   */
+  listFiles(kind: FileContextKind, id: number): Promise<Result<CanvasFile[]>> {
+    return this.http.list<CanvasFile>(`/${kind}/${id}/files`, { sort: 'updated_at', order: 'desc' });
+  }
+
+  listFolders(kind: FileContextKind, id: number): Promise<Result<CanvasFolder[]>> {
+    return this.http.list<CanvasFolder>(`/${kind}/${id}/folders`);
+  }
+
+  /** The modules fallback, used only when /files is denied (SPEC.md section 4). */
+  listModules(courseId: number): Promise<Result<CanvasModule[]>> {
+    return this.http.list<CanvasModule>(`/courses/${courseId}/modules`, { 'include[]': ['items'] });
+  }
+
   listSubmissions(courseId: number): Promise<Result<CanvasSubmission[]>> {
     return this.http.list<CanvasSubmission>(`/courses/${courseId}/students/submissions`, {
       'student_ids[]': ['self'],
@@ -160,4 +181,6 @@ export class CanvasClient {
 }
 
 /** DECISIONS.md D-30: safe whether the true cap is 10 or higher. */
+export type FileContextKind = 'courses' | 'groups';
+
 export const ANNOUNCEMENT_CHUNK = 10;

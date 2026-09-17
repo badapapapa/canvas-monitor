@@ -9,6 +9,12 @@
  * DDL runs against the raw client rather than through the dry-run Mutator,
  * because a migration is a whole-file unit. `--dry-run` here lists what would
  * be applied and applies nothing.
+ *
+ * Each migration after 0001 is applied ATOMICALLY, together with its
+ * bookkeeping row, through libSQL's `migrate()`: one transaction, foreign keys
+ * off for its duration. From 0007 onward migrations rebuild tables holding live
+ * data (SQLite cannot alter a CHECK constraint in place), and a rebuild that
+ * died between DROP and RENAME would lose it. All or nothing.
  */
 
 import { createHash } from 'node:crypto';
@@ -26,6 +32,58 @@ export interface Migration {
   version: string;
   sql: string;
   checksum: string;
+}
+
+/**
+ * Split a migration file into statements: strips `--` comments and splits on
+ * semicolons, both only outside single-quoted strings.
+ *
+ * Deliberately refuses CREATE TRIGGER, whose BEGIN...END body contains
+ * semicolons this splitter would cut through. Better a loud refusal the day a
+ * trigger is added (FTS5, Phase 7) than a silently mangled migration.
+ */
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = '';
+  let inString = false;
+  for (let i = 0; i < sql.length; i += 1) {
+    const ch = sql[i];
+    if (inString) {
+      current += ch;
+      if (ch === "'") {
+        if (sql[i + 1] === "'") {
+          current += "'";
+          i += 1;
+        } else {
+          inString = false;
+        }
+      }
+      continue;
+    }
+    if (ch === "'") {
+      inString = true;
+      current += ch;
+    } else if (ch === '-' && sql[i + 1] === '-') {
+      const end = sql.indexOf('\n', i);
+      i = end === -1 ? sql.length : end - 1;
+    } else if (ch === ';') {
+      statements.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  statements.push(current);
+  const out = statements.map((s) => s.trim()).filter((s) => s !== '');
+  const trigger = out.find((s) => /\bCREATE\s+(TEMP\s+|TEMPORARY\s+)?TRIGGER\b/i.test(s));
+  if (trigger !== undefined) {
+    throw new AppError(
+      'migration_failed',
+      'splitStatements cannot safely split CREATE TRIGGER (its body contains semicolons).',
+      'Extend the splitter to handle BEGIN...END before adding a trigger migration.',
+    );
+  }
+  return out;
 }
 
 export interface MigrateOutcome {
@@ -93,13 +151,16 @@ export async function migrate(
     }
 
     log.info('migrate.applying', { version: migration.version });
-    if (migration.version !== first.version) {
-      await client.executeMultiple(migration.sql);
-    }
-    await client.execute({
+    const bookkeeping = {
       sql: 'INSERT INTO schema_migrations (version, applied_at, checksum) VALUES (?, ?, ?)',
       args: [migration.version, clock.now().toISOString(), migration.checksum],
-    });
+    };
+    if (migration.version === first.version) {
+      await client.execute(bookkeeping); // 0001 already ran, idempotently, above
+    } else {
+      // The migration and the record that it ran commit together, or neither does.
+      await client.migrate([...splitStatements(migration.sql), bookkeeping]);
+    }
     outcome.applied.push(migration.version);
   }
 

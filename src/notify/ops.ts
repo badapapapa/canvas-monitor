@@ -51,9 +51,13 @@ function family(key: string): string | null {
   return at === -1 ? null : key.slice(0, at);
 }
 
-/** True when `key` falls under one of the prefixes evaluated this run. */
-function evaluated(key: string, prefixes: readonly string[]): boolean {
-  return prefixes.some((p) => key === p || key.startsWith(p));
+/**
+ * True when `key` was evaluated this run. An entry ending in ':' or '@' is a
+ * family prefix; anything else must match exactly. Plain prefix matching would
+ * let `coverage:1` claim `coverage:10` -- and resolve another course's alert.
+ */
+export function evaluated(key: string, entries: readonly string[]): boolean {
+  return entries.some((p) => (p.endsWith(':') || p.endsWith('@') ? key.startsWith(p) : key === p));
 }
 
 export async function reconcileAlerts(

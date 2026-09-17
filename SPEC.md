@@ -209,7 +209,20 @@ A 401 is never retried. A dead token does not recover by waiting.
   `/files`, fall back to extracting `type == "File"` items from
   `/modules?include[]=items`, using `content_id` as the file identifier. Record
   which path succeeded per context as `coverage_status`:
-  `full` | `modules_only` | `none`.
+  `full` | `modules_only` | `none`. Coverage is re-checked every run and changes
+  **only on a definitive answer**, never on a transient error. A drop to
+  `modules_only` or `none` raises one ops alert, and every content message from
+  a `modules_only` course says so. When a course comes back, files that were
+  there all along are baselined, not announced (DECISIONS.md D-47).
+- **A file seen through Modules has no size or `modified_at`.** Judge a file
+  change only on fields both observations report, or a Files tab being hidden
+  makes every file look "updated".
+- **File `updated_at` is noise**; it moves with no content change. Never use it
+  to decide whether to notify. **`modified_at` is kept across course copies**,
+  so it can be years *earlier* than `created_at`; that is normal.
+- **A file can be hidden, locked or still uploading** (`hidden_for_user`,
+  `locked_for_user`, `upload_status`). Hold it back, and announce it as "now
+  available" when that changes.
 - **Timezone.** Canvas returns UTC. I am in `Asia/Singapore` (UTC+8). Store UTC
   in the database. Convert to SGT before any date bucketing, day grouping, or
   display. A 23:59 SGT deadline is 15:59Z and will land on the wrong day if
@@ -313,7 +326,7 @@ watermarks (
   PRIMARY KEY (context_id, resource_type)
 )
 
-items (                        -- announcements, assignments, pages, comments
+items (                        -- announcements, assignments, grades, comments, files (D-47)
   id TEXT PRIMARY KEY,         -- hash of (context_id, resource_type, external_id)
   context_id INTEGER, resource_type TEXT, external_id TEXT,
   title TEXT, body_text TEXT, body_hash TEXT,
@@ -325,8 +338,8 @@ items (                        -- announcements, assignments, pages, comments
   UNIQUE (context_id, resource_type, external_id)
 )
 
-files (
-  id TEXT PRIMARY KEY,         -- hash of (context_id, 'file', canvas_file_id)
+files (                        -- Phase 4: download state. Detection lives in items (D-47)
+  id TEXT PRIMARY KEY,         -- hash of (context_id, 'file', canvas_file_id) = the file's items.id
   context_id INTEGER, canvas_file_id INTEGER,
   display_name TEXT, normalised_stem TEXT,
   size_bytes INTEGER, content_sha256 TEXT,
@@ -797,7 +810,7 @@ Ship and use each phase before starting the next. **Do not build ahead.**
 | 0 | Repo, config table, contexts schema, Canvas client with pagination + rate limiting + three-state errors, `--dry-run`, raw capture, run instrumentation | `npm run probe` lists my courses |
 | 1 | `npm run discover` (§16), mapping table, coverage detection, section resolution, `enrollment_state=completed` probe | `courses.seed.json` reviewed and loaded; coverage correct for every module |
 | 2 | Announcements + assignments + submissions/feedback ingest. **Notification only, no downloading.** Section-override fixture captured first. | Runs a week; alerts feel correct and timely |
-| 3 | Files + modules fallback + groups ingest. Still no downloading. | New files detected reliably, zero false positives |
+| 3 | Files + modules fallback + **group files** (group announcements cut, D-36/D-47). Coverage transitions visible. Still no downloading. | New files detected reliably, zero false positives |
 | 4 | OneDrive upload, atomicity, size gate, resumable upload, **seed routing defaults** (D-40), one-off **prior-term backfill** command (D-36) | Files land correctly and are verified |
 | 5 | Routing rules, `_unsorted` flow, `--replay` | Most files route correctly; misroutes are visible |
 | 6 | `npm run tune-patterns`, then answer follow-ups | Patterns confirmed against real history; tracking works end to end |

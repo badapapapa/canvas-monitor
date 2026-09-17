@@ -31,7 +31,9 @@ import {
   normaliseAssignment,
   normaliseComments,
   normaliseGrade,
-  RESOURCE_TYPES,
+  normaliseFile,
+  normaliseModuleFile,
+  RESOURCES_FOR,
   type ItemRecord,
   type ResourceType,
 } from '../ingest/normalise.ts';
@@ -40,6 +42,7 @@ import { enqueueContent, enqueueOps, enqueueWatching, flush, type FlushOutcome }
 import { formatSgt, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
+import type { CoverageStatus } from '../discover/coverage.ts';
 import { loadMigrations } from '../core/db/migrate.ts';
 import { ping } from './healthcheck.ts';
 import { MISSED_SLOTS_REPORT_THRESHOLD, slotsBetween } from './schedule.ts';
@@ -63,11 +66,14 @@ interface ResourceFetch {
   detail: string | null;
 }
 
-interface CourseContext {
+interface SyncContext {
   contextId: number;
+  contextType: 'course' | 'group';
   canvasId: number;
   label: string;
   firstSeenAt: string;
+  /** As stored before this run. */
+  coverage: CoverageStatus;
 }
 
 interface Watermark {
@@ -247,18 +253,28 @@ async function syncBody(
   const watermarks = await loadWatermarks(ctx, contexts.map((c) => c.contextId));
   outcome.contexts = contexts.length;
 
-  const announcements = await fetchAnnouncements(ctx, canvas, contexts, now);
+  const courses = contexts.filter((c) => c.contextType === 'course');
+  const announcements = await fetchAnnouncements(ctx, canvas, courses, now);
+  const webBase = config.require('canvas_base_url').replace(/\/api\/v1\/?$/, '');
   const watching: WatchingPayload = { kind: 'watching', contexts: [] };
   const baselinedScope: string[] = [];
+  const coverageNow = new Map<number, CoverageStatus>();
 
   for (const context of contexts) {
     try {
-      const result = await syncCourse(ctx, canvas, context, {
-        announcements: announcements.get(context.canvasId) ?? ok([]),
+      const result = await syncContext(ctx, canvas, context, {
+        announcements: context.contextType === 'course' ? (announcements.get(context.canvasId) ?? ok([])) : undefined,
         watermarks: watermarks.get(context.contextId) ?? new Map(),
         selfId: self.value.id,
+        webBase,
         now,
       });
+      coverageNow.set(context.contextId, result.coverage);
+      if (result.coverageDetermined) {
+        const alert = coverageAlert(context, result.coverage, result.linked);
+        if (alert !== null) alerts.push(alert);
+        evaluatedPrefixes.push(`coverage:${context.contextId}`);
+      }
       if (result.failed) outcome.failedContexts += 1;
       outcome.notified += result.notified;
       if (result.payload !== null) outcome.planned.push(result.payload);
@@ -282,7 +298,7 @@ async function syncBody(
     await enqueueWatching(ctx.db, { scopeKey: baselinedScope.sort().join(','), payload: watching, now });
   }
 
-  alerts.push(...(await staleContextAlerts(ctx, contexts, now)));
+  alerts.push(...(await staleContextAlerts(ctx, contexts, coverageNow, now)));
   evaluatedPrefixes.push('context_stale:');
 
   await reportScheduleGap(ctx, now);
@@ -307,20 +323,97 @@ async function syncBody(
   return outcome;
 }
 
-async function loadContexts(ctx: RunContext): Promise<CourseContext[]> {
+async function loadContexts(ctx: RunContext): Promise<SyncContext[]> {
   const rows = await ctx.db.read(
-    `SELECT x.context_id, x.canvas_id, x.first_seen_at, c.module_code
-       FROM contexts x JOIN courses c ON c.context_id = x.context_id
-      WHERE x.enabled = 1 AND x.context_type = 'course'
-      ORDER BY x.context_id`,
+    `SELECT x.context_id, x.context_type, x.canvas_id, x.first_seen_at, x.coverage_status,
+            COALESCE(c.module_code, g.module_code) AS module_code
+       FROM contexts x
+       LEFT JOIN courses c ON c.context_id = x.context_id
+       LEFT JOIN groups g ON g.context_id = x.context_id
+      WHERE x.enabled = 1
+      ORDER BY x.context_type, x.context_id`,
   );
-  return rows.rows.map((r) => ({
-    contextId: Number(r['context_id']),
-    canvasId: Number(r['canvas_id']),
+  return rows.rows.map((r) => {
+    const contextType = String(r['context_type']) === 'group' ? 'group' : 'course';
     // Never null for an enabled context: the seed loader rejects that (D-37).
-    label: String(r['module_code']),
-    firstSeenAt: String(r['first_seen_at']),
-  }));
+    const code = r['module_code'] === null ? `${contextType} ${String(r['canvas_id'])}` : String(r['module_code']);
+    return {
+      contextId: Number(r['context_id']),
+      contextType,
+      canvasId: Number(r['canvas_id']),
+      label: contextType === 'group' ? `${code} · group` : code,
+      firstSeenAt: String(r['first_seen_at']),
+      coverage: String(r['coverage_status']) as CoverageStatus,
+    };
+  });
+}
+
+interface FileFetch {
+  fetch: ResourceFetch;
+  /** null: not determined this run (a transient error), so keep what is stored. */
+  coverage: CoverageStatus | null;
+  /** Files found through Modules, when that is the path in use. */
+  linked: number | null;
+}
+
+/**
+ * Files, by whichever path the course allows (SPEC.md section 4). Coverage
+ * changes only on a DEFINITIVE answer -- a readable or denied listing -- and
+ * never on a transient error, or one Canvas hiccup would page me twice.
+ */
+async function fetchFiles(canvas: CanvasClient, context: SyncContext, webBase: string): Promise<FileFetch> {
+  const kind = context.contextType === 'group' ? 'groups' : 'courses';
+  const files = await canvas.listFiles(kind, context.canvasId);
+
+  if (files.kind === 'ok') {
+    const folders = await canvas.listFolders(kind, context.canvasId);
+    const names = new Map<number, string | null>(
+      folders.kind === 'ok' ? folders.value.map((f) => [f.id, f.full_name ?? null]) : [],
+    );
+    // A folder listing failure costs the folder label, never the file.
+    const records = files.value.map((f) =>
+      normaliseFile(
+        f,
+        f.folder_id === null || f.folder_id === undefined ? null : (names.get(f.folder_id) ?? null),
+        `${webBase}/${kind}/${context.canvasId}/files/${f.id}`,
+      ),
+    );
+    return {
+      fetch: { status: 'ok', records, detail: folders.kind === 'ok' ? null : `folders: ${describe(folders)}` },
+      coverage: 'full',
+      linked: null,
+    };
+  }
+  if (files.kind === 'error') {
+    return { fetch: { status: 'error', records: [], detail: describe(files) }, coverage: null, linked: null };
+  }
+  if (context.contextType === 'group') {
+    return { fetch: { status: 'denied_or_absent', records: [], detail: describe(files) }, coverage: 'none', linked: null };
+  }
+
+  const modules = await canvas.listModules(context.canvasId);
+  if (modules.kind === 'ok') {
+    const found = modules.value.flatMap((m) =>
+      (m.items ?? [])
+        .map((i) => normaliseModuleFile(i, m.name ?? null))
+        .filter((r): r is ItemRecord => r !== null),
+    );
+    // A file linked from two modules is one file: content_id is its id (D-23).
+    const unique = [...new Map(found.map((r) => [r.externalId, r])).values()];
+    return {
+      fetch: { status: 'ok', records: unique, detail: 'read through Modules; the Files tab is not readable' },
+      coverage: 'modules_only',
+      linked: unique.length,
+    };
+  }
+  if (modules.kind === 'error') {
+    return { fetch: { status: 'error', records: [], detail: describe(modules) }, coverage: null, linked: null };
+  }
+  return {
+    fetch: { status: 'denied_or_absent', records: [], detail: `${describe(files)}; ${describe(modules)}` },
+    coverage: 'none',
+    linked: null,
+  };
 }
 
 async function loadWatermarks(ctx: RunContext, contextIds: number[]): Promise<Map<number, Map<ResourceType, Watermark>>> {
@@ -351,7 +444,7 @@ async function loadWatermarks(ctx: RunContext, contextIds: number[]): Promise<Ma
 async function fetchAnnouncements(
   ctx: RunContext,
   canvas: CanvasClient,
-  contexts: CourseContext[],
+  contexts: SyncContext[],
   now: Date,
 ): Promise<Map<number, Result<CanvasAnnouncement[]>>> {
   const out = new Map<number, Result<CanvasAnnouncement[]>>();
@@ -379,61 +472,88 @@ function statusOf<T>(result: Result<T>): FetchStatus {
   return result.kind === 'ok' ? 'ok' : result.kind;
 }
 
-async function syncCourse(
+interface ContextResult {
+  failed: boolean;
+  notified: number;
+  baselined: Map<ResourceType, number>;
+  payload: ContentPayload | null;
+  /** Coverage after this run; equal to the stored value when undetermined. */
+  coverage: CoverageStatus;
+  coverageDetermined: boolean;
+  linked: number | null;
+}
+
+async function syncContext(
   ctx: RunContext,
   canvas: CanvasClient,
-  context: CourseContext,
+  context: SyncContext,
   input: {
-    announcements: Result<CanvasAnnouncement[]>;
+    announcements: Result<CanvasAnnouncement[]> | undefined;
     watermarks: Map<ResourceType, Watermark>;
     selfId: number;
+    webBase: string;
     now: Date;
   },
-): Promise<{ failed: boolean; notified: number; baselined: Map<ResourceType, number>; payload: ContentPayload | null }> {
+): Promise<ContextResult> {
   const { now } = input;
   const log = ctx.log.child({ context_id: context.contextId });
+  const applicable = RESOURCES_FOR[context.contextType];
+  const fetches: Partial<Record<ResourceType, ResourceFetch>> = {};
 
   // --- fetch, outside any transaction (SPEC.md section 7) ------------------
-  const assignments = await canvas.listAssignments(context.canvasId);
-  const submissions = await canvas.listSubmissions(context.canvasId);
-  const assignmentById = new Map<number, CanvasAssignment>(
-    assignments.kind === 'ok' ? assignments.value.map((a) => [a.id, a]) : [],
-  );
+  const files = await fetchFiles(canvas, context, input.webBase);
+  fetches.file = files.fetch;
+  if (files.fetch.status === 'ok' && files.fetch.detail !== null) {
+    log.warn('sync.files_partial', { detail: files.fetch.detail });
+  }
 
-  // D-38: /announcements answers 200 [] for a course the token cannot read.
-  // An empty list is "none posted" only if another endpoint proves the course
-  // is readable in this same run; otherwise it is unverified.
-  const readable = assignments.kind === 'ok' || submissions.kind === 'ok';
-  const fetches: Record<ResourceType, ResourceFetch> = {
-    announcement:
-      input.announcements.kind !== 'ok'
-        ? { status: statusOf(input.announcements), records: [], detail: describe(input.announcements) }
-        : input.announcements.value.length === 0 && !readable
+  if (context.contextType === 'course') {
+    const assignments = await canvas.listAssignments(context.canvasId);
+    const submissions = await canvas.listSubmissions(context.canvasId);
+    const assignmentById = new Map<number, CanvasAssignment>(
+      assignments.kind === 'ok' ? assignments.value.map((a) => [a.id, a]) : [],
+    );
+    const announcements = input.announcements ?? ok([]);
+
+    // D-38: /announcements answers 200 [] for a course the token cannot read.
+    // An empty list is "none posted" only if another endpoint proves the course
+    // is readable in this same run; otherwise it is unverified.
+    const readable = assignments.kind === 'ok' || submissions.kind === 'ok' || files.fetch.status === 'ok';
+    fetches.announcement =
+      announcements.kind !== 'ok'
+        ? { status: statusOf(announcements), records: [], detail: describe(announcements) }
+        : announcements.value.length === 0 && !readable
           ? { status: 'unverified', records: [], detail: 'empty list, and no other endpoint confirmed readability (D-38)' }
           : {
               status: 'ok',
-              records: input.announcements.value
+              records: announcements.value
                 .map((a) => normaliseAnnouncement(a, now))
                 .filter((r): r is ItemRecord => r !== null),
               detail: null,
-            },
-    assignment:
+            };
+    fetches.assignment =
       assignments.kind === 'ok'
         ? { status: 'ok', records: assignments.value.map(normaliseAssignment), detail: null }
-        : { status: statusOf(assignments), records: [], detail: describe(assignments) },
-    grade:
+        : { status: statusOf(assignments), records: [], detail: describe(assignments) };
+    fetches.grade =
       submissions.kind === 'ok'
         ? { status: 'ok', records: submissions.value.map((s) => normaliseGrade(s, assignmentById.get(s.assignment_id))), detail: null }
-        : { status: statusOf(submissions), records: [], detail: describe(submissions) },
-    comment:
+        : { status: statusOf(submissions), records: [], detail: describe(submissions) };
+    fetches.comment =
       submissions.kind === 'ok'
         ? {
             status: 'ok',
             records: submissions.value.flatMap((s) => normaliseComments(s, assignmentById.get(s.assignment_id), input.selfId)),
             detail: null,
           }
-        : { status: statusOf(submissions), records: [], detail: describe(submissions) },
-  };
+        : { status: statusOf(submissions), records: [], detail: describe(submissions) };
+  }
+
+  const coverage = files.coverage ?? context.coverage;
+  // Newly readable through /files after Modules-only or nothing: files that
+  // were there all along become visible at once. They are baselined, not
+  // announced one by one, and the "now watching" summary says so (D-47).
+  const upgraded = files.coverage === 'full' && (context.coverage === 'modules_only' || context.coverage === 'none');
 
   // --- classify against stored state (reads only) --------------------------
   const storedRows = await ctx.db.read({
@@ -450,13 +570,14 @@ async function syncCourse(
 
   const decided: Classified[] = [];
   const baselined = new Map<ResourceType, number>();
-  for (const type of RESOURCE_TYPES) {
+  for (const type of applicable) {
     const fetch = fetches[type];
+    if (fetch === undefined) continue;
     if (fetch.status !== 'ok') {
       log.warn('sync.resource_skipped', { resource: type, status: fetch.status, detail: fetch.detail });
       continue;
     }
-    const baseline = input.watermarks.get(type)?.baselinedAt == null;
+    const baseline = input.watermarks.get(type)?.baselinedAt == null || (type === 'file' && upgraded);
     for (const record of fetch.records) {
       const c = classify(record, stored.get(`${type}:${record.externalId}`), { baseline });
       if (c.kind !== 'unchanged') decided.push(c);
@@ -469,7 +590,16 @@ async function syncCourse(
 
   const toNotify = decided.filter((c) => c.notify);
   const payload: ContentPayload | null =
-    toNotify.length === 0 ? null : { kind: 'content', contextLabel: context.label, items: toNotify.map(renderItemOf) };
+    toNotify.length === 0
+      ? null
+      : {
+          kind: 'content',
+          contextLabel: context.label,
+          items: toNotify.map(renderItemOf),
+          ...(coverage === 'modules_only'
+            ? { note: 'Read through Modules: the Files tab is hidden, so files not linked in a module are missed.' }
+            : {}),
+        };
   const urgent = toNotify.some(
     (c) =>
       c.record.resourceType === 'assignment' &&
@@ -478,11 +608,18 @@ async function syncCourse(
       new Date(c.record.dueAt).getTime() - now.getTime() <= URGENT_WINDOW_MS,
   );
 
-  // --- commit: items, watermarks and the queued notification together ------
+  // --- commit: items, watermarks, coverage and the queued notification -------
   await ctx.db.transaction(`sync context ${context.contextId}`, async (tx) => {
     for (const c of decided) await upsertItem(tx, context.contextId, c, now, baselined.has(c.record.resourceType));
-    for (const type of RESOURCE_TYPES) {
-      await upsertWatermark(tx, context.contextId, type, fetches[type], now, baselined.has(type));
+    for (const type of applicable) {
+      const fetch = fetches[type];
+      if (fetch !== undefined) await upsertWatermark(tx, context.contextId, type, fetch, now, baselined.has(type));
+    }
+    if (files.coverage !== null) {
+      await tx.write.execute('record coverage', {
+        sql: 'UPDATE contexts SET coverage_status = ?, coverage_checked_at = ? WHERE context_id = ?',
+        args: [files.coverage, now.toISOString(), context.contextId],
+      });
     }
     if (payload !== null) {
       await enqueueContent(tx, {
@@ -498,16 +635,29 @@ async function syncCourse(
     }
   });
 
-  const failed = RESOURCE_TYPES.some((t) => fetches[t].status !== 'ok');
+  if (files.coverage !== null && files.coverage !== context.coverage && context.coverage !== 'unknown') {
+    log.warn('sync.coverage_changed', { from: context.coverage, to: files.coverage });
+  }
+
+  const failed = applicable.some((t) => fetches[t]?.status !== 'ok');
   log.info('sync.context_done', {
     new: decided.filter((c) => c.kind === 'new').length,
     revised: decided.filter((c) => c.kind === 'revised').length,
     notify: toNotify.length,
     urgent,
     baselined: [...baselined.values()].reduce((a, b) => a + b, 0),
+    coverage,
     failed,
   });
-  return { failed, notified: toNotify.length, baselined, payload };
+  return {
+    failed,
+    notified: toNotify.length,
+    baselined,
+    payload,
+    coverage,
+    coverageDetermined: files.coverage !== null,
+    linked: files.linked,
+  };
 }
 
 function renderItemOf(c: Classified): RenderItem {
@@ -523,6 +673,16 @@ function renderItemOf(c: Classified): RenderItem {
     dueAt: r.dueAt,
     ...(Array.isArray(r.meta['other_due_dates']) ? { otherDueDates: r.meta['other_due_dates'] as string[] } : {}),
     ...(typeof r.meta['preview'] === 'string' ? { preview: r.meta['preview'] } : {}),
+    ...(r.resourceType === 'file'
+      ? {
+          file: {
+            folder: (r.meta['folder'] as string | null | undefined) ?? null,
+            size: ((r.meta['facts'] as { size?: number | null } | undefined)?.size) ?? null,
+            module: (r.meta['module'] as string | null | undefined) ?? null,
+            unlockAt: (r.meta['unlock_at'] as string | null | undefined) ?? null,
+          },
+        }
+      : {}),
     ...(r.resourceType === 'grade' && facts !== undefined
       ? {
           grade: {
@@ -617,16 +777,23 @@ function maxTimestamp(records: ItemRecord[]): string | null {
   return best === null ? null : new Date(best).toISOString();
 }
 
-async function staleContextAlerts(ctx: RunContext, contexts: CourseContext[], now: Date): Promise<AlertCondition[]> {
+async function staleContextAlerts(
+  ctx: RunContext,
+  contexts: SyncContext[],
+  coverage: Map<number, CoverageStatus>,
+  now: Date,
+): Promise<AlertCondition[]> {
   const fresh = await loadWatermarks(ctx, contexts.map((c) => c.contextId));
   const out: AlertCondition[] = [];
   for (const c of contexts) {
     const marks = fresh.get(c.contextId) ?? new Map<ResourceType, Watermark>();
     // The stalest resource decides. A resource that has never succeeded counts
-    // from when the context was first seen.
+    // from when the context was first seen. Files are left out when coverage
+    // is 'none': the coverage alert already says so, in plainer words.
+    const types = RESOURCES_FOR[c.contextType].filter((t) => !(t === 'file' && coverage.get(c.contextId) === 'none'));
     let oldest = Number.POSITIVE_INFINITY;
     const failing: string[] = [];
-    for (const type of RESOURCE_TYPES) {
+    for (const type of types) {
       const mark = marks.get(type);
       const t = new Date(mark?.lastOkAt ?? c.firstSeenAt).getTime();
       if (t < oldest) oldest = t;
@@ -635,7 +802,7 @@ async function staleContextAlerts(ctx: RunContext, contexts: CourseContext[], no
       }
     }
     const age = now.getTime() - oldest;
-    if (age > STALE_AFTER_MS) {
+    if (types.length > 0 && age > STALE_AFTER_MS) {
       out.push({
         key: `context_stale:${c.contextId}`,
         severity: 'warn',
@@ -645,6 +812,36 @@ async function staleContextAlerts(ctx: RunContext, contexts: CourseContext[], no
     }
   }
   return out;
+}
+
+/**
+ * Reduced file coverage, raised once and resolved when it recovers (the
+ * observation-week ask: a switch to Modules-only must degrade visibly). Never
+ * reminded: a course can legitimately stay Modules-only all semester, and every
+ * one of its messages already carries a note saying so.
+ */
+function coverageAlert(context: SyncContext, coverage: CoverageStatus, linked: number | null): AlertCondition | null {
+  if (coverage === 'modules_only') {
+    return {
+      key: `coverage:${context.contextId}`,
+      severity: 'warn',
+      summary: `${context.label}: file coverage reduced to Modules only (${linked ?? 0} file${linked === 1 ? '' : 's'} linked there).`,
+      detail: 'Its Files tab is no longer readable. Files not linked from a module will not be detected.',
+      remindEveryMs: null,
+    };
+  }
+  if (coverage === 'none') {
+    return {
+      key: `coverage:${context.contextId}`,
+      severity: 'warn',
+      summary: `${context.label}: files are not readable at all.`,
+      detail:
+        'Neither the Files tab nor Modules can be read, so no new file here will be detected. ' +
+        'If the course has concluded, anything not already archived is now unrecoverable (D-36).',
+      remindEveryMs: null,
+    };
+  }
+  return null;
 }
 
 /**

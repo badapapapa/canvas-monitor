@@ -12,11 +12,17 @@
 
 import { createHash } from 'node:crypto';
 import { htmlToText, preview } from '../core/html.ts';
-import type { CanvasAnnouncement, CanvasAssignment, CanvasSubmission } from '../canvas/types.ts';
+import type { CanvasAnnouncement, CanvasAssignment, CanvasFile, CanvasModuleItem, CanvasSubmission } from '../canvas/types.ts';
 
-export type ResourceType = 'announcement' | 'assignment' | 'grade' | 'comment';
+export type ResourceType = 'announcement' | 'assignment' | 'grade' | 'comment' | 'file';
 
-export const RESOURCE_TYPES: readonly ResourceType[] = ['announcement', 'assignment', 'grade', 'comment'];
+export const RESOURCE_TYPES: readonly ResourceType[] = ['announcement', 'assignment', 'grade', 'comment', 'file'];
+
+/** What each kind of context is polled for. Groups have files only (D-47). */
+export const RESOURCES_FOR: Record<'course' | 'group', readonly ResourceType[]> = {
+  course: RESOURCE_TYPES,
+  group: ['file'],
+};
 
 export interface ItemRecord {
   resourceType: ResourceType;
@@ -197,4 +203,105 @@ export function normaliseComments(
         notifiable: true,
       };
     });
+}
+
+/**
+ * The facts a file change is judged on. `size` and `modified_at` are null when
+ * the file was seen through Modules, which does not report them.
+ *
+ * Deliberately absent: `updated_at` (observed to move with no content change)
+ * and the folder (instructors reorganise; a move is not news).
+ */
+export interface FileFacts {
+  name: string | null;
+  size: number | null;
+  modified_at: string | null;
+  /** Visible and downloadable to me right now. */
+  accessible: boolean;
+}
+
+export type FileSource = 'files' | 'modules';
+
+/** Strip Canvas's root folder name: "course files/Week 6/Labs" -> "Week 6/Labs". */
+export function displayFolder(fullName: string | null | undefined): string | null {
+  if (fullName === null || fullName === undefined) return null;
+  const rest = fullName.replace(/^(course|group|user) files\/?/, '');
+  return rest === '' ? null : rest;
+}
+
+function fileRecord(
+  externalId: string,
+  facts: FileFacts,
+  extra: { url: string | null; folder: string | null; createdAt: string | null; updatedAt: string | null; source: FileSource; module?: string | null; mimeClass?: string | null; unlockAt?: string | null },
+): ItemRecord {
+  return {
+    resourceType: 'file',
+    externalId,
+    title: facts.name,
+    bodyText: null,
+    bodyHash: null,
+    contentHash: hashOf(facts),
+    canvasUrl: extra.url,
+    postedAt: extra.createdAt,
+    updatedAt: extra.updatedAt,
+    dueAt: null,
+    meta: {
+      facts,
+      source: extra.source,
+      folder: extra.folder,
+      ...(extra.module === undefined || extra.module === null ? {} : { module: extra.module }),
+      ...(extra.mimeClass === undefined || extra.mimeClass === null ? {} : { mime_class: extra.mimeClass }),
+      ...(extra.unlockAt === undefined || extra.unlockAt === null ? {} : { unlock_at: extra.unlockAt }),
+    },
+    // A hidden, locked or still-uploading file is not news yet. When it becomes
+    // accessible, the classifier reports it as newly available.
+    notifiable: facts.accessible,
+  };
+}
+
+/**
+ * A file from /files. `webUrl` is the Canvas page for the file, built from its
+ * id. The object's own `url` carries a time-limited verifier and is never
+ * stored (SPEC.md section 4).
+ */
+export function normaliseFile(f: CanvasFile, folderFullName: string | null, webUrl: string): ItemRecord {
+  const uploaded = f.upload_status === null || f.upload_status === undefined || f.upload_status === 'success';
+  return fileRecord(
+    String(f.id),
+    {
+      name: f.display_name ?? f.filename ?? null,
+      size: f.size ?? null,
+      modified_at: f.modified_at ?? null,
+      accessible: uploaded && f.hidden_for_user !== true && f.locked_for_user !== true,
+    },
+    {
+      url: webUrl,
+      folder: displayFolder(folderFullName),
+      createdAt: f.created_at ?? null,
+      updatedAt: f.updated_at ?? null,
+      source: 'files',
+      mimeClass: f.mime_class ?? null,
+      unlockAt: f.unlock_at ?? null,
+    },
+  );
+}
+
+/**
+ * A file seen only as a module item, when /files is denied. `content_id` is the
+ * Canvas file id, so this converges on the same item as /files would (D-23).
+ */
+export function normaliseModuleFile(item: CanvasModuleItem, moduleName: string | null): ItemRecord | null {
+  if (item.type !== 'File' || item.content_id === null || item.content_id === undefined) return null;
+  return fileRecord(
+    String(item.content_id),
+    { name: item.title ?? null, size: null, modified_at: null, accessible: item.published !== false },
+    {
+      url: item.html_url ?? null,
+      folder: null,
+      createdAt: null,
+      updatedAt: null,
+      source: 'modules',
+      module: moduleName,
+    },
+  );
 }

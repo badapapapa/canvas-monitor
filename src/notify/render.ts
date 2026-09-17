@@ -27,12 +27,19 @@ export interface RenderItem {
   otherDueDates?: string[];
   preview?: string;
   grade?: { score: number | null; grade: string | null; pointsPossible: number | null; excused: boolean };
+  file?: { folder: string | null; size: number | null; module: string | null; unlockAt: string | null };
 }
 
 export interface ContentPayload {
   kind: 'content';
   contextLabel: string;
   items: RenderItem[];
+  /**
+   * Shown under the header when coverage is partial (SPEC.md section 2.2): a
+   * message from a course read through Modules must say so every time, not
+   * only in the one-off ops alert.
+   */
+  note?: string;
 }
 
 export interface WatchingPayload {
@@ -110,6 +117,14 @@ function fieldValue(field: string, value: unknown): string {
   return String(value);
 }
 
+/** "1.3 MB", "812 KB". */
+export function humanSize(bytes: number | null): string | null {
+  if (bytes === null) return null;
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 function renderItem(item: RenderItem, now: Date): string {
   const lines: string[] = [];
   const target = link(item.title, item.url);
@@ -166,6 +181,26 @@ function renderItem(item: RenderItem, now: Date): string {
       lines.push(`✅ ${verb}: ${target}${value === '' ? '' : ` — <b>${escapeHtml(value)}</b>`}`);
       break;
     }
+    case 'file': {
+      const f = item.file;
+      const where = f?.folder ?? (f?.module === null || f?.module === undefined ? null : `module: ${f.module}`);
+      const detail = [humanSize(f?.size ?? null), where].filter((x): x is string => x !== null).join(' · ');
+      const change = item.change?.kind === 'file' ? item.change : null;
+      if (change?.transition === 'updated') {
+        const renamed = change.changes.find((c) => c.field === 'name');
+        const resized = change.changes.find((c) => c.field === 'size');
+        const note = renamed !== undefined
+          ? `renamed from “${String(renamed.from)}”`
+          : resized !== undefined
+            ? `new version (${humanSize(Number(resized.from))} → ${humanSize(Number(resized.to))})`
+            : 'new version';
+        lines.push(`📄 Updated: ${target} — ${escapeHtml(note)}`);
+      } else {
+        const verb = change?.transition === 'available' ? '📄 Now available: ' : '📄 ';
+        lines.push(`${verb}${target}${detail === '' ? '' : ` — ${escapeHtml(detail)}`}`);
+      }
+      break;
+    }
     case 'comment': {
       lines.push(`💬 ${item.kind === 'new' ? 'Feedback' : 'Feedback edited'}: ${target}`);
       if (item.preview !== undefined && item.preview !== '') lines.push(`<i>${escapeHtml(item.preview)}</i>`);
@@ -210,8 +245,9 @@ export function pack(header: string, continuation: string, blocks: string[]): st
 
 export function renderContent(payload: ContentPayload, now: Date): string[] {
   const label = escapeHtml(payload.contextLabel);
+  const note = payload.note === undefined ? '' : `\n<i>${escapeHtml(payload.note)}</i>`;
   return pack(
-    `<b>${label}</b> · ${escapeHtml(summarise(payload.items))}`,
+    `<b>${label}</b> · ${escapeHtml(summarise(payload.items))}${note}`,
     `<b>${label}</b> · continued`,
     payload.items.map((item) => renderItem(item, now)),
   );
@@ -222,6 +258,7 @@ export function renderWatching(payload: WatchingPayload): string[] {
     announcement: ['announcement', 'announcements'],
     assignment: ['assignment', 'assignments'],
     grade: ['posted grade', 'posted grades'],
+    file: ['file', 'files'],
     comment: ['feedback comment', 'feedback comments'],
   };
   const blocks = payload.contexts.map((c) => {

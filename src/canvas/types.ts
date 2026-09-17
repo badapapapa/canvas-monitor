@@ -53,24 +53,56 @@ export interface CanvasEnrollment {
   sis_section_id?: string | null;
 }
 
+/**
+ * A Canvas file, as observed 2026-09-17 across 84 real files.
+ *
+ * `url` carries a time-limited verifier token (SPEC.md section 4) and is
+ * deliberately NOT declared here, so no code can reach for it by accident.
+ *
+ * Observed semantics worth knowing:
+ *  - `updated_at` moves without any content change (most files had it differ
+ *    from created_at; one moved this morning with nothing else changed). It is
+ *    noise, and is never used to decide whether to notify.
+ *  - `modified_at` is the content's own timestamp. Files copied from an earlier
+ *    offering keep their ORIGINAL modified_at, up to three years before
+ *    created_at, so modified_at < created_at is normal, not an error.
+ */
 export interface CanvasFile {
   id: number;
   display_name?: string | null;
   filename?: string | null;
   size?: number | null;
+  created_at?: string | null;
   updated_at?: string | null;
+  modified_at?: string | null;
   folder_id?: number | null;
   locked?: boolean;
   hidden?: boolean;
   hidden_for_user?: boolean;
+  locked_for_user?: boolean;
+  lock_at?: string | null;
+  unlock_at?: string | null;
+  /** 'success' on every observed file; anything else is not yet downloadable. */
+  upload_status?: string | null;
+  mime_class?: string | null;
   'content-type'?: string | null;
+}
+
+export interface CanvasFolder {
+  id: number;
+  /** e.g. "course files/Weekly Learning Materials/Week 06/Lecture Notes" */
+  full_name?: string | null;
+  name?: string | null;
 }
 
 export interface CanvasModuleItem {
   id: number;
   title?: string | null;
   type?: string | null;
+  /** For type 'File', the Canvas file id -- the same id /files reports (D-23). */
   content_id?: number | null;
+  html_url?: string | null;
+  published?: boolean | null;
 }
 
 export interface CanvasModule {

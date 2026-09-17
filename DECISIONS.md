@@ -361,7 +361,7 @@ and an unchunked request fails.
 
 ---
 
-## D-32 — ANSWERED: /files honours the sort · settled 2026-09-10
+## D-32 — ANSWERED: /files honours the sort · settled 2026-09-10; early stop NOT built (D-47)
 
 `sort=updated_at&order=desc` returned five files newest-first against a real
 course. **The D-03 early-stop optimisation is safe to build in Phase 3**:
@@ -371,6 +371,15 @@ walking the whole list every 20 minutes.
 This matters more than it looks, because D-03 established that Canvas offers no
 server-side `updated_since` filter. Without this sort, every run would paginate
 every course's full file list forever.
+
+**Amended 2026-09-17: the early stop was not built.** The sort works, but the
+optimisation it enables turned out not to be worth its risk. At observed sizes
+(13 to 40 files per course) a full listing is one page per course, and the rate
+limiter still reads 700 after a full Phase 3 run. Stopping at the first file
+with an old `updated_at` would miss a file that became visible without that
+timestamp moving: a silent miss, which is the one failure this system exists
+to prevent. Full listings every run. Revisit only if a course grows past a few
+pages.
 
 ---
 
@@ -580,6 +589,12 @@ is what the dismiss affordance is for.
 file discovered by both paths produces one row, not two. That convergence is the
 reason the fallback is safe rather than a duplicate source, and it was worth
 writing down explicitly.
+
+**Applied in Phase 3 (D-47).** A file is an item with `resource_type = 'file'`
+and `external_id` = its Canvas file id, so `items.id` is exactly this formula.
+The Phase 4 `files` table (download state) shares the id rather than inventing
+another. Verified by test: a file seen through /files and then through Modules
+stays one item.
 
 ---
 
@@ -810,6 +825,15 @@ routinely posts lecture recordings to Panopto. Its post-lecture announcement of
 2026-09-16 points to the recordings there, as earlier ones did. So the gap
 described above is real for my enrolment, not hypothetical. Still deferred,
 and to be revisited after Phase 3 as planned, now with a known affected module.
+
+**Evidence, 2026-09-17 (Phase 3 survey): the tab cannot tell us which modules.**
+All three enabled courses carry an identical "Videos/Panopto" navigation tab,
+along with the same six other external tools. It is an institution-wide
+default, present whether or not a module uses it. So the plan above to let
+"the coverage panel show which modules embed Panopto" will not work from the
+tab list. A detector needs the per-folder feed, or a per-module setting I
+confirm by hand. The same survey shows a second blind spot of the same kind:
+a "Course Readings" tool, where reading lists live outside the Canvas file API.
 
 Note that SPEC §16 already excludes video from the archive on quota grounds
 ("lecture recordings live in Panopto and are not worth the quota"). This entry
@@ -1212,3 +1236,84 @@ While runs are stopped, only the dead-man's switch (D-44) can speak. A healthy
 check with period 1 h and grace 2 h should have alerted about three hours into
 this gap, around 15:00 SGT on Sunday. Whether it did determines whether that
 switch is configured correctly.
+
+
+---
+
+## D-47 — Phase 3 as built: file detection · applied 2026-09-17
+
+**Why it mattered, from the observation week.** Phase 2 knew about files only
+when an instructor *announced* them. The Phase 3 survey found the failure this
+project exists for, in real data: a midterm revision PDF uploaded
+on a Sunday evening, **4.5 hours after** the only related announcement, three
+days before the exam, and never mentioned since. Replayed on a copy of
+production, Phase 3 announces it.
+
+**Observed on the live instance, 2026-09-17 (84 files, 3 courses, 2 groups):**
+
+- **`/files` is complete here.** One course links all 31 of its files from
+  Modules, and all 31 are also in `/files`; no module-only files exist in any
+  course.
+- **`updated_at` is noise.** It differs from `created_at` on most files, and
+  moved on one file the morning of the survey with nothing else changing. It
+  is never used to decide whether to notify.
+- **`modified_at` survives course copies.** In one course, 18 files have
+  `modified_at` *before* `created_at`, by up to three years: files carried over
+  from an earlier offering. So it is a stable content timestamp, usable in the
+  hash.
+- `upload_status` was `success` on every file. `hidden_for_user` and
+  `locked_for_user` were never set. Both groups have 0 files and 0
+  announcements.
+
+**Design, and the deviations from SPEC.md it records:**
+
+- **Files are items** (`resource_type = 'file'`), not rows of a separate
+  `files` table as SPEC §6 drafted. This reuses classification, the queue,
+  `silent_sync` and watermarks unchanged, and the id matches D-23, so Phase 4's
+  `files` table shares it. Migration 0007 rebuilds `items` and `watermarks`,
+  because SQLite cannot widen a CHECK constraint in place.
+- **Migrations are now atomic.** Each file and its bookkeeping row are applied
+  in one libSQL `migrate()` transaction. Before this, a rebuild failing between
+  DROP and RENAME would have lost the table. Verified by a test that fails when
+  the runner reverts to the old path. The statement splitter refuses triggers
+  loudly rather than mangling them.
+- **The content hash is `{name, size, modified_at, accessible}`.** Not
+  `updated_at` (noise) and not the folder (moves are not news). A rename and a
+  new version are reported distinctly. A hidden, locked or still-uploading file
+  is held back and announced as "now available" when it becomes accessible.
+- **Changes are judged on fields both sides report.** Modules gives no size or
+  `modified_at`. Comparing those against a `/files` observation would mark
+  every file "updated" the moment a Files tab was hidden: a false flood at
+  exactly the moment coverage degrades. Verified by a test that fails without
+  the rule.
+- **Coverage transitions are visible (the observation-week ask).** Coverage is
+  re-checked every run, and changes only on a definitive answer, never on a
+  transient error. `modules_only` or `none` raises one ops alert, never
+  reminded, and resolves when coverage recovers. While `modules_only`, every
+  content message from that course says so. On recovery, files that were there
+  all along are baselined, not announced, and the "now watching" summary
+  explains.
+- **Files are linked by their Canvas page**, `/courses/:id/files/:fid`, built
+  from the id. The object's own `url` carries a verifier and is never stored.
+  Verified by a test that searches every stored row.
+- **No early stop** on `updated_at` (D-32, amended).
+- **Groups: files only.** Group announcements were cut under the priority rule
+  (D-36): neither group has any, and group files share the course code path at
+  almost no cost.
+
+**Also fixed on the way.** `reconcileAlerts` matched evaluated keys by prefix,
+so marking `coverage:1` evaluated would also have matched `coverage:10` and
+resolved another course's alert. Family prefixes must now end in `:` or `@`;
+everything else matches exactly.
+
+**Pre-flight on a copy of production (then deleted).** Every production row was
+copied into a local database at schema 0006, and 0007 applied: every table
+byte-identical afterwards, zero foreign-key violations. The first Phase 3 sync
+on that copy, against real Canvas, baselined exactly 84 files, raised no
+alerts and sent one "now watching" message. The second sent nothing. Forgetting
+two real uploads reproduced the two messages the week should have produced.
+
+**Unexercised against real data:** the Modules fallback, coverage transitions,
+"updated"/"renamed" detection, and hidden-then-available files. All are covered
+by end-to-end tests, and five reintroduced bugs were each caught, but none has
+happened for real yet. Treat the first real occurrence of each as its test.

@@ -21,11 +21,16 @@ Single user. No accounts, no sharing, no dashboard before Phase 8.
 - [`DECISIONS.md`](DECISIONS.md) — every deviation from the original draft, with
   reasoning.
 
-**Current phase: 2 — built, not yet running on a schedule.** Phases 0 and 1
-are done: Canvas client, course discovery, reviewed seed. Phase 2 polls
-announcements, assignments, grades and feedback and notifies via Telegram; no
-downloading yet. Done when it has run for a week and the alerts feel correct and
-timely. The archive deadline that shapes the next phases is in DECISIONS.md D-36.
+**Current phase: 3 — file detection, built.** Phase 2 (announcements,
+assignments, grades, feedback) has run for a week. Phase 3 adds a notification
+when a file appears, including one nobody announced, for courses and project
+groups. It is still detection only: downloading and the archive are Phase 4,
+which has a deadline (DECISIONS.md D-36).
+
+**Deploying a phase that adds a migration: run `npm run migrate` first, then
+push.** `sync` refuses to run against a schema behind its code, so pushing first
+fails every scheduled run until the migration is applied. Migrations are
+atomic: all or nothing.
 
 ---
 

@@ -29,12 +29,16 @@ import { startServer, sendJson, type FakeServer } from '../helpers/fake-canvas.t
 interface FakeCourse {
   assignments: unknown[] | number; // a number is an HTTP status to fail with
   submissions: unknown[] | number;
+  files?: unknown[] | number;
+  folders?: unknown[] | number;
+  modules?: unknown[] | number;
 }
 
 interface CanvasState {
   auth: boolean;
   announcements: Array<Record<string, unknown>>;
   courses: Record<number, FakeCourse>;
+  groups: Record<number, { files?: unknown[] | number; folders?: unknown[] | number }>;
 }
 
 interface Sent {
@@ -59,10 +63,12 @@ function canvasHandler(state: CanvasState) {
       const codes = url.searchParams.getAll('context_codes[]');
       return sendJson(res, 200, state.announcements.filter((a) => codes.includes(String(a['context_code']))));
     }
-    const m = /^\/api\/v1\/courses\/(\d+)\/(assignments|students\/submissions)$/.exec(url.pathname);
+    const m = /^\/api\/v1\/(courses|groups)\/(\d+)\/(assignments|students\/submissions|files|folders|modules)$/.exec(url.pathname);
     if (m !== null) {
-      const course = state.courses[Number(m[1])];
-      const value = m[2] === 'assignments' ? course?.assignments : course?.submissions;
+      const owner = m[1] === 'courses' ? state.courses[Number(m[2])] : state.groups[Number(m[2])];
+      const field = m[3] === 'students/submissions' ? 'submissions' : (m[3] as string);
+      const defaults: Record<string, unknown[]> = { files: [], folders: [{ id: 1, full_name: 'course files' }], modules: [] };
+      const value = owner === undefined ? undefined : ((owner as Record<string, unknown>)[field] ?? defaults[field]);
       if (value === undefined) return sendJson(res, 404, { errors: [{ message: 'not found' }] });
       if (typeof value === 'number') return sendJson(res, value, { errors: [{ message: 'failure' }] });
       return sendJson(res, 200, value);
@@ -87,6 +93,7 @@ async function harness(): Promise<{
       10001: { assignments: [], submissions: [] },
       10002: { assignments: [], submissions: [] },
     },
+    groups: {},
   };
   const canvas = await startServer(canvasHandler(state));
   servers.push(canvas);
@@ -182,6 +189,24 @@ function announcement(id: number, course: number, title: string, message = '<p>B
   return { id, title, message, posted_at: '2026-09-10T02:00:00Z', context_code: `course_${course}`, html_url: `https://canvas.example/a/${id}` };
 }
 
+function file(id: number, name: string, over: Record<string, unknown> = {}) {
+  return {
+    id, display_name: name, filename: name, size: 1_300_000, folder_id: 7,
+    created_at: '2026-09-15T14:14:00Z', updated_at: '2026-09-15T14:14:00Z', modified_at: '2026-09-15T14:14:00Z',
+    hidden: false, hidden_for_user: false, locked: false, locked_for_user: false, upload_status: 'success',
+    mime_class: 'pdf',
+    // The real object carries a time-limited verifier. It must never be stored.
+    url: `https://canvas.example/files/${id}/download?download_frd=1&verifier=SECRETVERIFIER${id}`,
+    ...over,
+  };
+}
+
+const FOLDERS = [
+  { id: 1, full_name: 'course files' },
+  { id: 7, full_name: 'course files/Week 06/Lecture Notes' },
+  { id: 8, full_name: 'course files/Week 06/Practical Lab' },
+];
+
 function assignment(id: number, due: string, over: Record<string, unknown> = {}) {
   return { id, name: `Assignment ${id}`, due_at: due, published: true, html_url: `https://canvas.example/as/${id}`, all_dates: [{ due_at: due }], ...over };
 }
@@ -268,7 +293,9 @@ describe('sync end to end', () => {
   });
 
   it('treats an empty announcements list from an unreadable course as unverified, not quiet (D-38)', async () => {
-    h.state.courses[10002] = { assignments: 404, submissions: 404 };
+    // An unreadable course denies everything readable -- files and modules
+    // included -- while /announcements still answers with an empty success.
+    h.state.courses[10002] = { assignments: 404, submissions: 404, files: 404, modules: 404 };
 
     const outcome = await sync(h);
 
@@ -410,11 +437,228 @@ describe('sync end to end', () => {
     assert.equal(h.sent.length, 0);
   });
 
+  // --- Phase 3: files ------------------------------------------------------------
+
+  it('baselines existing files on the first sync instead of announcing them', async () => {
+    Object.assign(h.state.courses[10001] as FakeCourse, { files: [file(1, 'Lecture 01.pdf'), file(2, 'Lecture 02.pdf')], folders: FOLDERS });
+    const outcome = await sync(h);
+    assert.equal(outcome.notified, 0);
+    assert.match(content(h)[0]?.text ?? '', /AB1234<\/b> — 2 files/);
+  });
+
+  it('announces a silently uploaded file, with where it is and how big', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'Lecture 01.pdf')], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    course.files = [file(1, 'Lecture 01.pdf'), file(2, 'Exam Revision Pack.pdf', { size: 299_330, folder_id: 1 })];
+    const outcome = await sync(h);
+
+    assert.equal(outcome.notified, 1);
+    const msg = content(h)[0]?.text ?? '';
+    assert.match(msg, /📄 <a href="http:\/\/127\.0\.0\.1:\d+\/courses\/10001\/files\/2"><b>Exam Revision Pack\.pdf<\/b><\/a> — 292 KB/);
+    assert.doesNotMatch(msg, /\/api\/v1/, 'the link must open the file page, not the API');
+    assert.doesNotMatch(msg, /course files/, 'the root folder name is noise');
+  });
+
+  it('sends a lecture drop as one message, each file with its folder', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    course.files = [
+      file(10, 'Lecture 06.pptx', { size: 3_312_020 }),
+      file(11, 'Lecture 06.pdf'),
+      file(12, 'src.zip', { size: 6_313 }),
+      file(13, 'Lab Sheet 4.pdf', { folder_id: 8 }),
+    ];
+    await sync(h);
+
+    assert.equal(content(h).length, 1, 'one message, not four');
+    const msg = content(h)[0]?.text ?? '';
+    assert.match(msg, /AB1234<\/b> · 4 new/);
+    assert.match(msg, /Lecture 06\.pptx<\/b><\/a> — 3\.2 MB · Week 06\/Lecture Notes/);
+    assert.match(msg, /src\.zip<\/b><\/a> — 6 KB · Week 06\/Lecture Notes/);
+    assert.match(msg, /Lab Sheet 4\.pdf<\/b><\/a> — 1\.2 MB · Week 06\/Practical Lab/);
+  });
+
+  it('ignores updated_at churn and folder moves: zero false positives', async () => {
+    // Observed live: updated_at moves with no content change, and instructors
+    // reorganise folders. Neither is news.
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'Lab 03.pdf')], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    course.files = [file(1, 'Lab 03.pdf', { updated_at: '2026-09-17T00:59:00Z', folder_id: 8 })];
+    const outcome = await sync(h);
+    assert.equal(outcome.notified, 0);
+    assert.equal(h.sent.length, 0);
+  });
+
+  it('keeps a copied file with modified_at before created_at quiet', async () => {
+    // Files copied from an earlier offering keep their original modified_at.
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'dataset.csv', { modified_at: '2023-06-01T00:00:00Z' })], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+    await sync(h);
+    assert.equal(h.sent.length, 0);
+  });
+
+  it('reports a rename and a new version of the same file distinctly', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'Tutorial 6.pdf'), file(2, 'Slides.pdf', { size: 1_000_000 })], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    course.files = [
+      file(1, 'Tutorial 6 (corrected).pdf'),
+      file(2, 'Slides.pdf', { size: 1_500_000, modified_at: '2026-09-17T01:00:00Z' }),
+    ];
+    await sync(h);
+
+    const msg = content(h)[0]?.text ?? '';
+    assert.match(msg, /Updated: .*Tutorial 6 \(corrected\)\.pdf.* — renamed from “Tutorial 6\.pdf”/);
+    assert.match(msg, /Updated: .*Slides\.pdf.* — new version \(977 KB → 1\.4 MB\)/);
+  });
+
+  it('holds a hidden file back, then announces it when it becomes available', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    course.files = [file(5, 'Answers.pdf', { hidden_for_user: true, locked_for_user: true })];
+    await sync(h);
+    assert.equal(h.sent.length, 0, 'not accessible yet: not news');
+
+    course.files = [file(5, 'Answers.pdf')];
+    await sync(h);
+    assert.match(content(h)[0]?.text ?? '', /Now available: .*Answers\.pdf/);
+  });
+
+  it('holds back a file that is still uploading', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+    course.files = [file(6, 'Big.pptx', { upload_status: 'pending' })];
+    await sync(h);
+    assert.equal(h.sent.length, 0);
+  });
+
+  it('never stores the time-limited download URL', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [], folders: FOLDERS });
+    await sync(h);
+    course.files = [file(1, 'Lecture 01.pdf')];
+    await sync(h);
+    for (const table of ['items', 'notifications']) {
+      const rows = await h.client.execute(`SELECT * FROM ${table}`);
+      assert.doesNotMatch(JSON.stringify(rows.rows), /SECRETVERIFIER|verifier=/, `verifier leaked into ${table}`);
+    }
+  });
+
+  it('degrades visibly when the Files tab is hidden: one alert, no false flood', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'Lecture 01.pdf'), file(2, 'Lab 01.pdf')], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+
+    // The instructor hides the Files tab; both files are still linked in Modules.
+    Object.assign(course, {
+      files: 404,
+      modules: [{ id: 1, name: 'Week 1', items: [
+        { id: 91, type: 'File', title: 'Lecture 01.pdf', content_id: 1, html_url: 'https://canvas.example/m/91', published: true },
+        { id: 92, type: 'Page', title: 'Welcome' },
+        { id: 93, type: 'File', title: 'Lab 01.pdf', content_id: 2, html_url: 'https://canvas.example/m/93', published: true },
+      ] }],
+    });
+    const outcome = await sync(h);
+
+    assert.equal(content(h).length, 0, 'the same files seen through Modules must not look "updated"');
+    assert.equal(ops(h).length, 1);
+    assert.match(ops(h)[0]?.text ?? '', /AB1234: file coverage reduced to Modules only \(2 files linked there\)/);
+    assert.equal(outcome.status, 'ok', 'reduced coverage is not a failure; the alert carries it');
+    const row = await h.client.execute('SELECT coverage_status FROM contexts WHERE context_id = 1');
+    assert.equal(row.rows[0]?.['coverage_status'], 'modules_only');
+
+    await sync(h);
+    assert.equal(ops(h).length, 1, 'said once, not every run');
+
+    // A new file linked in a module is still found, and the message says how.
+    (course.modules as Array<{ items: unknown[] }>)[0]?.items.push(
+      { id: 94, type: 'File', title: 'Lab 02.pdf', content_id: 3, html_url: 'https://canvas.example/m/94', published: true },
+    );
+    await sync(h);
+    const msg = content(h)[0]?.text ?? '';
+    assert.match(msg, /Lab 02\.pdf.* — module: Week 1/);
+    assert.match(msg, /Read through Modules: the Files tab is hidden/);
+  });
+
+  it('recovers quietly when the Files tab returns: re-baseline, one "resolved"', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, {
+      files: 404,
+      modules: [{ id: 1, name: 'Week 1', items: [{ id: 91, type: 'File', title: 'Lecture 01.pdf', content_id: 1, published: true }] }],
+    });
+    await sync(h);
+    h.sent.length = 0;
+
+    // Back to full: three files existed all along, only one was linked.
+    Object.assign(course, { files: [file(1, 'Lecture 01.pdf'), file(2, 'Unlinked A.pdf'), file(3, 'Unlinked B.pdf')], folders: FOLDERS });
+    await sync(h);
+
+    assert.equal(content(h).filter((s) => s.text.includes('📄')).length, 0, 'files that were there all along are not "new"');
+    assert.match(content(h)[0]?.text ?? '', /Now watching[\s\S]*AB1234<\/b> — 3 files/);
+    assert.match(ops(h)[0]?.text ?? '', /Resolved.*AB1234: file coverage reduced/);
+  });
+
+  it('does not flip coverage on a transient error', async () => {
+    const course = h.state.courses[10001] as FakeCourse;
+    Object.assign(course, { files: [file(1, 'Lecture 01.pdf')], folders: FOLDERS });
+    await sync(h);
+    h.sent.length = 0;
+    course.files = 422;
+    await sync(h);
+    const row = await h.client.execute('SELECT coverage_status FROM contexts WHERE context_id = 1');
+    assert.equal(row.rows[0]?.['coverage_status'], 'full');
+    assert.equal(ops(h).length, 0);
+  });
+
+  it('says plainly when files cannot be read at all', async () => {
+    Object.assign(h.state.courses[10001] as FakeCourse, { files: 403, modules: 403 });
+    await sync(h);
+    assert.match(ops(h)[0]?.text ?? '', /AB1234: files are not readable at all/);
+    await sync(h);
+    assert.equal(ops(h).length, 1);
+  });
+
+  it('watches enabled groups for files, labelled by their module', async () => {
+    await h.client.execute(`INSERT INTO contexts (context_id, context_type, canvas_id, enabled, coverage_status, first_seen_at)
+                            VALUES (3, 'group', 20001, 1, 'unknown', '2026-09-10T00:00:00Z')`);
+    await h.client.execute(`INSERT INTO groups (context_id, canvas_group_id, parent_canvas_course_id, parent_context_id, module_code, term)
+                            VALUES (3, 20001, 10001, 1, 'AB1234', '2610')`);
+    h.state.groups[20001] = { files: [], folders: [{ id: 1, full_name: 'group files' }] };
+    await sync(h);
+    h.sent.length = 0;
+
+    h.state.groups[20001] = { files: [file(40, 'Project Proposal.docx', { folder_id: 1 })], folders: [{ id: 1, full_name: 'group files' }] };
+    await sync(h);
+
+    const msg = content(h)[0]?.text ?? '';
+    assert.match(msg, /<b>AB1234 · group<\/b> · 1 new/);
+    assert.match(msg, /href="http:\/\/127\.0\.0\.1:\d+\/groups\/20001\/files\/40"/);
+  });
+
   it('refuses to run against a schema behind the code, naming the fix', async () => {
-    await h.client.execute("DELETE FROM schema_migrations WHERE version = '0006_ingest'");
+    await h.client.execute("DELETE FROM schema_migrations WHERE version = '0007_file_items'");
     await assert.rejects(
       () => sync(h),
-      (e: unknown) => e instanceof Error && e.message.includes('0006_ingest not applied'),
+      (e: unknown) => e instanceof Error && e.message.includes('0007_file_items not applied'),
     );
     assert.equal(h.sent.length, 0);
   });

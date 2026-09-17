@@ -302,3 +302,14 @@ describe('telegram client', () => {
     assert.ok(!result.ok && !result.description.includes('A'.repeat(35)));
   });
 });
+
+describe('alert evaluation scope', () => {
+  it('matches families by delimiter and everything else exactly', async () => {
+    const { evaluated } = await import('../../src/notify/ops.ts');
+    assert.equal(evaluated('coverage:10', ['coverage:1']), false, 'context 1 must not claim context 10');
+    assert.equal(evaluated('coverage:1', ['coverage:1']), true);
+    assert.equal(evaluated('context_stale:10', ['context_stale:']), true);
+    assert.equal(evaluated('token_expiry@7', ['token_expiry@']), true);
+    assert.equal(evaluated('canvas_auth_other', ['canvas_auth']), false);
+  });
+});

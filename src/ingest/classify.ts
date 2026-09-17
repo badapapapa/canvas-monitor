@@ -7,7 +7,7 @@
  * a database.
  */
 
-import type { AssignmentFacts, GradeFacts, ItemRecord } from './normalise.ts';
+import type { AssignmentFacts, FileFacts, GradeFacts, ItemRecord } from './normalise.ts';
 
 export interface StoredItem {
   contentHash: string;
@@ -17,6 +17,12 @@ export interface StoredItem {
 export type ChangeDetail =
   | { kind: 'assignment'; changes: Array<{ field: keyof AssignmentFacts; from: unknown; to: unknown }> }
   | { kind: 'grade'; transition: 'posted' | 'changed' }
+  | {
+      kind: 'file';
+      /** 'available': it was hidden, locked or uploading, and now is not. */
+      transition: 'available' | 'updated';
+      changes: Array<{ field: 'name' | 'size' | 'modified_at'; from: unknown; to: unknown }>;
+    }
   | { kind: 'edited' };
 
 export interface Classified {
@@ -83,8 +89,34 @@ function describeChange(record: ItemRecord, stored: StoredItem): ChangeDetail | 
       if (before === undefined || !before.posted) return { kind: 'grade', transition: 'posted' };
       return { kind: 'grade', transition: 'changed' };
     }
+    case 'file':
+      return describeFileChange(stored.meta['facts'] as FileFacts | undefined, record.meta['facts'] as FileFacts | undefined);
     case 'announcement':
     case 'comment':
       return { kind: 'edited' };
   }
+}
+
+/**
+ * Judge a file change on the fields BOTH sides report (DECISIONS.md D-47).
+ *
+ * A file seen through Modules has no size or modified_at. Comparing those
+ * against a /files observation would mark every file in a course "updated" the
+ * moment its Files tab was hidden -- a false flood, exactly when coverage
+ * degrades. Comparing only what both sides know makes a source switch silent.
+ */
+function describeFileChange(before: FileFacts | undefined, after: FileFacts | undefined): ChangeDetail | null {
+  if (after === undefined) return null;
+  if (!after.accessible) return null; // became hidden or locked: not news
+  if (before === undefined) return { kind: 'file', transition: 'available', changes: [] };
+
+  const changes: Array<{ field: 'name' | 'size' | 'modified_at'; from: unknown; to: unknown }> = [];
+  for (const field of ['name', 'size', 'modified_at'] as const) {
+    const a = before[field];
+    const b = after[field];
+    if (a !== null && b !== null && a !== b) changes.push({ field, from: a, to: b });
+  }
+
+  if (!before.accessible) return { kind: 'file', transition: 'available', changes };
+  return changes.length === 0 ? null : { kind: 'file', transition: 'updated', changes };
 }
