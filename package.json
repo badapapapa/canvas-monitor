@@ -20,7 +20,9 @@
     "discover": "node src/cli/index.ts discover",
     "seed-courses": "node src/cli/index.ts seed-courses",
     "sync": "node src/cli/index.ts sync",
-    "telegram-test": "node src/cli/index.ts telegram-test"
+    "telegram-test": "node src/cli/index.ts telegram-test",
+    "mutation-check": "node scripts/mutation-check.ts",
+    "leak-check": "node scripts/leak-check.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

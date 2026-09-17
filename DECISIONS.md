@@ -1142,6 +1142,13 @@ alerts when pings stop.
 Suggested check: period 1 hour, grace 2 hours — matching the 3-hour gap alert,
 so the switch fires only when the in-band alert cannot.
 
+**In use since 2026-09-12, and proven by the 2026-09-13 outage (D-46).** Actual
+configuration: period 1 h, grace 30 min. It alerted about 90 minutes into the
+outage. Its only failing was delivery, to email alone. It now also alerts the
+Telegram ops group, where every other operational alert already lands, and
+that path was tested end to end. **An alert is only as good as the place it
+arrives:** route the dead-man's switch to the channel that is actually watched.
+
 ---
 
 ## D-45 — Phase 2 as built: observations, delivery and failure policy · applied
@@ -1231,11 +1238,17 @@ mention it.
    expressions, and a test keeps the copies in code and YAML identical. A test
    also pins the real outage: 54 slots.
 
-**Open question.** Every in-band signal can fire only once a run happens again.
-While runs are stopped, only the dead-man's switch (D-44) can speak. A healthy
-check with period 1 h and grace 2 h should have alerted about three hours into
-this gap, around 15:00 SGT on Sunday. Whether it did determines whether that
-switch is configured correctly.
+**Answered 2026-09-17: the switch fired; the alert went where nobody looked.**
+healthchecks.io emailed "canvas-monitor-sync is DOWN" at 13:33 SGT on Sunday,
+about 90 minutes into the gap, matching the check's actual 1 h period and
+30 min grace. So detection worked. Delivery failed: it went to an email inbox
+nobody was watching on a Sunday afternoon.
+
+The two failures need different fixes. "The switch didn't fire" is a
+configuration problem. "It fired somewhere I wasn't looking" is a routing
+problem. This was the second. **Fix:** a Telegram integration on the same check,
+pointed at the ops group, verified end to end with healthchecks.io's test
+message. Email stays as a second channel. See D-44.
 
 
 ---
@@ -1317,3 +1330,48 @@ two real uploads reproduced the two messages the week should have produced.
 "updated"/"renamed" detection, and hidden-then-available files. All are covered
 by end-to-end tests, and five reintroduced bugs were each caught, but none has
 happened for real yet. Treat the first real occurrence of each as its test.
+
+
+---
+
+## D-48 — Claims are checkable by commands, not by trust · applied 2026-09-17
+
+**Why.** Twice in this project I found my own silent failures only after the
+fact: SPEC.md edits that never applied (D-45), and a module code and a real
+filename written into D-47. So pasted output is not enough. Every claim about
+tests and data hygiene now comes with a command I can re-run.
+
+| Command | What a clean result looks like |
+|---|---|
+| `npm run check` | exit 0; typecheck prints nothing; `ℹ fail 0` |
+| `npm run mutation-check` | exit 0; "all N reintroduced bugs caught" |
+| `npm run leak-check` | exit 0; "CLEAN", with a positive control above 0 |
+
+**`mutation-check`** replays ten bugs from this project's own history, each in a
+throwaway copy of the repo so the working tree is never touched, and requires
+the relevant tests to fail. A mutation whose target text has moved counts as a
+failure, not a pass: a mutation that silently applies nowhere would "prove"
+coverage of a bug that was never introduced. Its own failure paths were checked
+too: a comment-only edit is reported NOT CAUGHT and exits 1, and a missing
+target is reported TARGET MOVED.
+
+**`leak-check`** exists because the committed `repo-hygiene` test **could never
+have caught the D-47 leak**. It checks generic shapes (emails, matriculation
+numbers, credentials), and it cannot list my module codes, course names, Canvas
+ids or file names without being the leak itself. The check that did catch D-47
+was a pattern file I had typed from memory, outside the repo: not reproducible,
+and not trustworthy for the same reason as everything else here.
+`leak-check` builds its patterns at run time from gitignored local sources (the
+seed file, and item titles from the database) and searches every tracked file,
+every object in git history, and every commit message. It refuses to run under
+CI. It was proven to report a leak by planting one in a tracked file (the D-47
+sentence) and one in the object database only. Both were reported, both exited
+1, and both were removed. The one allowed hit is SPEC.md's notification
+mock-up, matched by shape rather than by embedding the code.
+
+**Verified from disk, not memory, the same day:** the production copy from the
+Phase 3 pre-flight is absent, as are its journal files. No database this
+project created exists in the scratchpad, the repo or the system temp directory
+(the only `.db` files there belong to a Chromium profile). The Canvas token's
+actual value appears in none of the 4,094 files scanned in those locations, nor
+anywhere in git history or the object database.

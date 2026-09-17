@@ -125,6 +125,24 @@ npm run probe -- --dry-run --json
 
 ---
 
+## Verifying, rather than trusting
+
+Three commands, each safe to run at any time. They are how to check a claim
+instead of taking it on trust (DECISIONS.md D-48).
+
+| Command | Clean result |
+|---|---|
+| `npm run check` | exit 0 · typecheck silent · `ℹ fail 0` |
+| `npm run mutation-check` | exit 0 · "all N reintroduced bugs caught" |
+| `npm run leak-check` | exit 0 · "CLEAN", with a positive control above 0 |
+
+`mutation-check` works in a throwaway copy and never touches the working tree.
+`leak-check` is local only: it derives its patterns from the gitignored seed
+file and the database, so it cannot run in CI and must never be made to.
+
+In zsh, `$?` after a pipe is the *last* command's status. Check an exit code
+without piping, e.g. `npm run check > /dev/null; echo $?`.
+
 ## Going live (Phase 2)
 
 In this order — each step is safe to stop after.
