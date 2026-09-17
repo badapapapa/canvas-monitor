@@ -36,20 +36,18 @@ import {
   type ResourceType,
 } from '../ingest/normalise.ts';
 import { reconcileAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
-import { enqueueContent, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
-import type { ContentPayload, Payload, RenderItem, WatchingPayload } from '../notify/render.ts';
+import { enqueueContent, enqueueOps, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
+import { formatSgt, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
 import { loadMigrations } from '../core/db/migrate.ts';
 import { ping } from './healthcheck.ts';
+import { MISSED_SLOTS_REPORT_THRESHOLD, slotsBetween } from './schedule.ts';
 
 /** SPEC.md section 12: a deadline inside this window overrides quiet hours. */
 export const URGENT_WINDOW_MS = 12 * 3600_000;
 /** SPEC.md section 12: a context stale for longer than this pages me. */
 export const STALE_AFTER_MS = 24 * 3600_000;
-/** A scheduled run this late, or a gap this long, means the scheduler is failing. */
-export const DRIFT_ALERT_MS = 60 * 60_000;
-export const GAP_ALERT_MS = 3 * 3600_000;
 /**
  * /announcements applies a short default window unless dates are given
  * (SPEC.md section 4). 200 days covers any semester, so a baseline sees the
@@ -287,11 +285,10 @@ async function syncBody(
   alerts.push(...(await staleContextAlerts(ctx, contexts, now)));
   evaluatedPrefixes.push('context_stale:');
 
-  if (ctx.scheduledFor !== undefined) {
-    const health = await scheduleHealthAlert(ctx, now);
-    if (health !== null) alerts.push(health);
-    evaluatedPrefixes.push('schedule_health');
-  }
+  await reportScheduleGap(ctx, now);
+  // No schedule condition is ever raised now; evaluating the prefix lets any
+  // row left active by the old raise/resolve alert close itself.
+  evaluatedPrefixes.push('schedule_health');
 
   outcome.alerts = await reconcileAlerts(ctx.db, now, alerts, evaluatedPrefixes);
   outcome.flush = await flush({ db: ctx.db, log: ctx.log, now, dryRun: ctx.dryRun }, telegram, chats);
@@ -650,25 +647,51 @@ async function staleContextAlerts(ctx: RunContext, contexts: CourseContext[], no
   return out;
 }
 
-async function scheduleHealthAlert(ctx: RunContext, now: Date): Promise<AlertCondition | null> {
-  const scheduledFor = ctx.scheduledFor;
-  if (scheduledFor === undefined) return null;
-  const drift = ctx.startedAt.getTime() - scheduledFor.getTime();
+/**
+ * A one-shot report when scheduled runs stopped and have now resumed
+ * (DECISIONS.md D-46).
+ *
+ * This used to be a raise/resolve alert, which turned the real 24-hour outage
+ * of 2026-09-13 into "running late" followed ten minutes later by "Resolved" --
+ * a day-long gap that read as a blip. A gap is only observable once runs
+ * resume, so it is reported as the event it is: how long, how many runs never
+ * happened, and that this run has already caught up.
+ *
+ * Counted in slots from the stored `scheduled_for` of the previous run, not in
+ * wall time, so a 20-minute daytime cadence and an hourly overnight one are
+ * both judged correctly.
+ */
+async function reportScheduleGap(ctx: RunContext, now: Date): Promise<void> {
+  const thisSlot = ctx.scheduledFor;
+  if (thisSlot === undefined) return;
   const previous = await ctx.db.read({
-    sql: `SELECT started_at FROM runs
+    sql: `SELECT scheduled_for FROM runs
            WHERE command = 'sync' AND dry_run = 0 AND scheduled_for IS NOT NULL AND run_id != ?
-           ORDER BY started_at DESC LIMIT 1`,
-    args: [ctx.runId],
+             AND scheduled_for < ?
+           ORDER BY scheduled_for DESC LIMIT 1`,
+    args: [ctx.runId, thisSlot.toISOString()],
   });
-  const prevStart = previous.rows[0]?.['started_at'];
-  const gap = prevStart === undefined || prevStart === null ? 0 : now.getTime() - new Date(String(prevStart)).getTime();
-  if (drift <= DRIFT_ALERT_MS && gap <= GAP_ALERT_MS) return null;
-  return {
-    key: 'schedule_health',
-    severity: 'warn',
-    summary: 'Scheduled syncs are running late or being skipped.',
-    detail:
-      `This run started ${Math.round(drift / 60_000)} min after its slot` +
-      (gap > 0 ? `; the previous scheduled run was ${(gap / 3600_000).toFixed(1)} h earlier.` : '.'),
-  };
+  const prevRaw = previous.rows[0]?.['scheduled_for'];
+  if (prevRaw === undefined || prevRaw === null) return;
+  const prevSlot = new Date(String(prevRaw));
+  const missed = slotsBetween(prevSlot, thisSlot);
+  if (missed < MISSED_SLOTS_REPORT_THRESHOLD) return;
+
+  const hours = (thisSlot.getTime() - prevSlot.getTime()) / 3600_000;
+  await enqueueOps(ctx.db, {
+    // Keyed on the gap itself, so a retried run cannot report it twice.
+    sendKey: `schedule_gap ${prevSlot.toISOString()}..${thisSlot.toISOString()}`,
+    payload: {
+      kind: 'ops',
+      severity: 'warn',
+      summary: `Scheduled syncs stopped for ${hours.toFixed(1)} h and have now resumed.`,
+      detail:
+        `${missed} scheduled run${missed === 1 ? '' : 's'} never happened; the last one before the gap ` +
+        `was for ${formatSgt(prevSlot.toISOString())}. This run re-read every course, so anything posted ` +
+        'in that window has now been checked. If this repeats, look in GitHub Actions for sync runs ' +
+        'that were queued for hours or cancelled.',
+    },
+    now,
+  });
+  ctx.log.warn('sync.schedule_gap', { missed_slots: missed, gap_hours: Number(hours.toFixed(2)) });
 }

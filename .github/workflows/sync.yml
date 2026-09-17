@@ -16,11 +16,17 @@ on:
     - cron: '0 15-23 * * *'
   workflow_dispatch: {}
 
-# The real mutex (D-07). Queue, never cancel: a cancelled run mid-transaction
-# is safe, but a cancelled run mid-send is a lost-then-duplicated message.
-concurrency:
-  group: sync
-  cancel-in-progress: false
+# Deliberately NO `concurrency:` group (DECISIONS.md D-46).
+#
+# On 2026-09-13 one run was never assigned a runner. It sat queued for 24 hours,
+# holding the group, and the group cancelled the 51 runs queued behind it: a
+# single lost job became a day-long outage. `timeout-minutes` could not help,
+# because it only counts once a job starts. Without the group a lost job costs
+# its own slot and nothing else.
+#
+# Overlap is still prevented where it matters: `sync_lock` is taken with a
+# conditional UPDATE, so a second concurrent run skips, and the timeout below
+# is shorter than the lock's 15-minute staleness window.
 
 permissions:
   contents: read

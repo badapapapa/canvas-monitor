@@ -76,7 +76,7 @@ async function harness(): Promise<{
   sent: Sent[];
   telegramMode: { value: 'ok' | 'forbidden' };
   clock: Clock & { set(iso: string): void };
-  ctx(options?: { dryRun?: boolean }): RunContext;
+  ctx(options?: { dryRun?: boolean; scheduledFor?: Date }): RunContext;
   client: Client;
   telegramUrl: string;
 }> {
@@ -155,7 +155,7 @@ async function harness(): Promise<{
         dryRun: options.dryRun === true,
         unsafeLog: false,
         ci: false,
-        scheduledFor: undefined,
+        scheduledFor: options.scheduledFor,
         startedAt: clock.now(),
         clock,
         log,
@@ -167,8 +167,16 @@ async function harness(): Promise<{
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
-const sync = (h: H, options: { dryRun?: boolean } = {}) =>
+const sync = (h: H, options: { dryRun?: boolean; scheduledFor?: Date } = {}) =>
   runSync(h.ctx(options), { telegramApiBase: h.telegramUrl });
+
+/** Record a completed scheduled run, as startRun would have. */
+async function priorRun(h: H, slot: string): Promise<void> {
+  await h.client.execute({
+    sql: `INSERT INTO runs (run_id, command, dry_run, scheduled_for, started_at, status) VALUES (?, 'sync', 0, ?, ?, 'ok')`,
+    args: [randomUUID(), slot, slot],
+  });
+}
 
 function announcement(id: number, course: number, title: string, message = '<p>Body</p>') {
   return { id, title, message, posted_at: '2026-09-10T02:00:00Z', context_code: `course_${course}`, html_url: `https://canvas.example/a/${id}` };
@@ -409,6 +417,35 @@ describe('sync end to end', () => {
       (e: unknown) => e instanceof Error && e.message.includes('0006_ingest not applied'),
     );
     assert.equal(h.sent.length, 0);
+  });
+
+  it('reports a scheduling gap once, as an event, with no later "Resolved"', async () => {
+    // The 2026-09-13 outage was sent as "running late" and then "Resolved" ten
+    // minutes on, which made a 24-hour gap read as a blip.
+    await sync(h);
+    h.sent.length = 0;
+    await priorRun(h, '2026-09-13T04:00:00.000Z');
+
+    h.clock.set('2026-09-14T04:37:31Z');
+    await sync(h, { scheduledFor: new Date('2026-09-14T04:20:00Z') });
+    assert.equal(ops(h).length, 1);
+    assert.match(ops(h)[0]?.text ?? '', /stopped for 24\.3 h and have now resumed/);
+    assert.match(ops(h)[0]?.text ?? '', /54 scheduled runs never happened/);
+
+    await priorRun(h, '2026-09-14T04:20:00.000Z');
+    h.clock.set('2026-09-14T04:47:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-14T04:40:00Z') });
+    assert.equal(ops(h).length, 1, 'no follow-up "Resolved" for an event');
+    assert.equal(content(h).length, 0);
+  });
+
+  it('says nothing about an on-time run or a single missed slot', async () => {
+    await sync(h);
+    h.sent.length = 0;
+    await priorRun(h, '2026-09-17T04:00:00.000Z');
+    h.clock.set('2026-09-17T04:47:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-17T04:40:00Z') }); // skipped 04:20 only
+    assert.equal(ops(h).length, 0);
   });
 
   it('takes over a lock abandoned for more than 15 minutes', async () => {

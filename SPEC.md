@@ -409,9 +409,12 @@ answerable and costs almost nothing since the text is already being extracted.
 Per run:
 
 1. **Acquire `sync_lock`.** If held and not stale, exit cleanly. Overlapping runs
-   corrupt watermarks. The real mutex is the workflow's `concurrency:` group plus
-   `timeout-minutes: 10` on the job, so a hung run cannot outlive its own lock;
-   `sync_lock` is the backstop for manual local runs.
+   corrupt watermarks. `sync_lock` is **the** mutex: it is taken with a
+   conditional UPDATE, and the job's `timeout-minutes: 10` is shorter than the
+   lock's 15-minute staleness window, so a hung run cannot outlive its own lock.
+   **Do not add a workflow `concurrency:` group** (DECISIONS.md D-46): a job that
+   is never assigned a runner holds the group indefinitely, is invisible to
+   `timeout-minutes`, and cancels every run queued behind it.
 2. For each enabled context:
    a. **Fetch the full listing** for each resource type. Canvas offers no
       server-side incremental filter (§4), so the watermark is a
@@ -633,14 +636,18 @@ Caveats to handle explicitly:
   workflow), `started_at`, and the resulting `drift_seconds` in the `runs`
   table, from Phase 0 onward. The Phase 2 review decides on numbers, not
   impressions.
-- `concurrency:` group plus `timeout-minutes: 10` — see §7.
+- `timeout-minutes: 10` and **no `concurrency:` group** — see §7 and D-46.
+- **A gap in scheduled runs is reported once, when runs resume**, as an event:
+  how long, how many scheduled runs never happened, and that the resuming run
+  has already re-read every course. It is not a raise/resolve alert. That form
+  turned a 24-hour outage into "Resolved" ten minutes later. Three missed slots
+  (one hour in the daytime) is the reporting threshold.
 - **Drift is measured from the cron expression that fired.** GitHub exposes
   which schedule fired, never when it was meant to run, so the run reconstructs
   its slot as the latest matching minute before it started. Once drift exceeds
   the cadence that reconstruction picks a *later* slot, so recorded drift is a
   **lower bound**; skipped runs are measured separately, as gaps between
-  consecutive runs (DECISIONS.md D-43). A run more than 60 min late, or a gap over
-  3 hours, raises a `schedule_health` alert.
+  consecutive runs (DECISIONS.md D-43), and reported as described below.
 - **Actions are pinned to commit SHAs**, not tags. The job holds the Turso
   credentials, and a public repository is where a retagged upstream action
   would bite.

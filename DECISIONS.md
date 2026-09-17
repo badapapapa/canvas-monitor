@@ -137,7 +137,7 @@ it never enters shell history or `ps`; the pre-commit hook blocks committing a
 
 ---
 
-## D-07 — The real mutex is the workflow, not `sync_lock` · specified (Phase 2)
+## D-07 — The real mutex is the workflow, not `sync_lock` · REVERSED 2026-09-17, see D-46
 
 **Was:** `sync_lock` with a 15-minute staleness window.
 **Now:** `concurrency:` group on the workflow plus `timeout-minutes: 10` on the
@@ -149,6 +149,15 @@ alongside it — producing exactly the overlapping-run watermark corruption the
 lock exists to prevent. A job that cannot outlive its own lock cannot cause that.
 
 **Cost:** none.
+
+**Reversed 2026-09-17 — the cost was a 24-hour outage (D-46).** The reasoning
+above covered a job that runs too long, and missed a job that never runs at all.
+A job waiting for a runner holds no `sync_lock` and is invisible to
+`timeout-minutes`, which starts counting only once the job starts, but it does
+hold the concurrency group. One such job held it for 24 hours. The group is
+removed. `sync_lock` is now the only mutex, and it was always sufficient: it is
+taken with a conditional UPDATE, and `timeout-minutes: 10` is shorter than its
+15-minute staleness window, which is the property this entry actually needed.
 
 ---
 
@@ -220,6 +229,31 @@ OneDrive tier already being paid for (D-12) — deletes all three.
 Not switching now: the staged plan is free, and the drift measurement is worth
 having either way. But if p95 drift is bad after two weeks, frame the decision
 as removing two schema workarounds *and* fixing latency, not as latency alone.
+
+### Phase 2 review, 2026-09-17 — verdict: stay on GitHub Actions
+
+Evidence from the first 5.1 days of scheduled runs (227 runs):
+
+| | median | p90 | p95 | max |
+|---|---|---|---|---|
+| all runs | 7.5 min | 11.8 min | 13.8 min | 17.5 min |
+| daytime, 20-min cadence | 6.8 min | 11.7 min | 14.0 min | 17.5 min |
+| overnight, hourly | 10.4 min | 11.8 min | 12.4 min | 12.6 min |
+
+No run reached its cadence, so D-43's lower-bound caveat never applied and these
+figures are exact. No slot ran twice. Median run time 12.6 s. Worst-case
+post-to-phone latency in the daytime is therefore about 20 + 17.5 ≈ 38 minutes —
+comfortably inside a problem statement measured in *days*.
+
+**Drift is not a reason to move.** The one real incident was a 24-hour gap
+(D-46), and the fault there was mine, not the scheduler's: GitHub lost one job,
+and my concurrency group turned that into a day. With the group removed, the
+same event costs one 20-minute slot. GitHub also silently never created 2
+scheduled runs in the week, both inside that window. Isolated drops like
+those are what the gap report (D-46) and the dead-man's switch (D-44) exist for.
+
+So the consolidation argument above is not triggered. Revisit only if gaps
+recur **after** the fix.
 
 ---
 
@@ -771,6 +805,12 @@ weeks away.
    `panopto_unwatched` and say so in the notification, so the gap is visible
    rather than silent. Visibly partial beats invisibly incomplete.
 
+**Evidence, 2026-09-17 (observation week):** at least one enabled module
+routinely posts lecture recordings to Panopto. Its post-lecture announcement of
+2026-09-16 points to the recordings there, as earlier ones did. So the gap
+described above is real for my enrolment, not hypothetical. Still deferred,
+and to be revisited after Phase 3 as planned, now with a known affected module.
+
 Note that SPEC §16 already excludes video from the archive on quota grounds
 ("lecture recordings live in Panopto and are not worth the quota"). This entry
 is about **detection and disclosure**, not about downloading them.
@@ -1121,3 +1161,54 @@ corrections were missing from SPEC.md (including the corrected module-code
 regex, D-35), though DECISIONS.md had them all. Found by auditing every intended
 edit against the file; all edits now go through a helper that fails unless the
 target occurs exactly once.
+
+
+---
+
+## D-46 — A 24-hour outage, caused by the concurrency group · fixed 2026-09-17
+
+**What happened.** No sync ran from 2026-09-13 04:20Z to 2026-09-14 04:00Z (Sunday
+12:20 to Monday 12:00 SGT): 54 missed slots. GitHub's own record, read from the
+public API, accounts for all of them:
+
+- **1 stuck run.** Run `34737923917` was created on time at 04:27Z and was
+  **never assigned a runner** (`runner_id: 0`, zero steps executed). GitHub
+  cancelled it 24.17 hours later.
+- **51 cancelled behind it.** The workflow's `concurrency: group: sync` let the
+  stuck run hold the group; each newly scheduled run went pending and cancelled
+  the one pending before it, which is documented behaviour. Each lived exactly
+  until the next schedule fired.
+- **2 never created.** GitHub silently skipped creating runs for 09:00Z and
+  09:40Z.
+
+`timeout-minutes: 10` could not help: it only counts once a job has started, and
+this one never did. The first run after the hold was cancelled started at 04:37Z,
+which is also the week's worst drift figure (17.5 min).
+
+**Impact: none on content.** Zero items were posted or updated in that window,
+and a full listing would have caught them up anyway. Both of the week's ops
+messages came from the resuming runs.
+
+**Why the report did not land.** The in-band alert said "running late or being
+skipped" and then "Resolved" ten minutes later. It was a raise/resolve condition
+evaluated per run, so it cleared as soon as the next run was on time. A
+day-long outage read as a blip, and the observation-week report did not
+mention it.
+
+**Fixes.**
+
+1. **The concurrency group is removed** (D-07 reversed). A lost job now costs its
+   own slot. `sync_lock` plus a timeout under its staleness window remains the
+   mutex; a test fails if a `concurrency:` key reappears.
+2. **Gaps are reported once, as events.** When a scheduled run finds three or more
+   slots missing since the previous one, it sends a single ops message: how
+   long, how many runs never happened, and that it has already re-read every
+   course. No "resolved" follows. Slots are counted with the workflow's own cron
+   expressions, and a test keeps the copies in code and YAML identical. A test
+   also pins the real outage: 54 slots.
+
+**Open question.** Every in-band signal can fire only once a run happens again.
+While runs are stopped, only the dead-man's switch (D-44) can speak. A healthy
+check with period 1 h and grace 2 h should have alerted about three hours into
+this gap, around 15:00 SGT on Sunday. Whether it did determines whether that
+switch is configured correctly.
