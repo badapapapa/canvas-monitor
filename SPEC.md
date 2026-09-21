@@ -240,21 +240,25 @@ Use my **personal** Microsoft account, not my NUS account. Two reasons: the NUS
 tenant will almost certainly block student app registrations, and NUS OneDrive
 is deleted some months after graduation.
 
-- Register an app in my own tenant. Delegated scope `Files.ReadWrite` plus
-  `offline_access`.
-- **Refresh tokens rotate on every use.** Microsoft returns a new refresh token
-  with each token exchange and invalidates the old one. Persist the new token in
-  the same transaction as its use. Failing to do this breaks auth after exactly
-  one cycle and is the most common way this integration dies.
-- **Large uploads require a resumable upload session,** not a simple PUT to the
-  content endpoint. Implement both paths. Verify the current simple-upload size
-  limit at Phase 4 and comment the observed value — do not hardcode 4MB as a
-  documented API limit; Microsoft has raised it and the docs have moved.
-  Resumable upload is required regardless, for reliability and progress.
-- Storage tier is **Microsoft 365 Basic (100GB)**, funded deliberately (§16).
-  Enforce a per-file size gate (default 50MB — link instead of downloading above
-  it) and track cumulative usage. Alert at 80% of 100GB. **Build no pruning
-  logic.**
+- Register an app in my own tenant; sign in with the device code flow against
+  the `/consumers` authority as a public client. Delegated scope
+  `Files.ReadWrite.AppFolder` plus `offline_access` by default, with
+  `Files.ReadWrite` and a named root folder as the contingency
+  (DECISIONS.md D-51).
+- **This is my real OneDrive (~123GB of personal files). The app never reads,
+  modifies, moves or deletes anything outside its own root.** Enforced by a
+  request guard on every call and a test that watches the wire (D-50).
+- **Refresh tokens rotate.** Microsoft returns a new refresh token with each
+  exchange; the old one is *not* revoked but must be discarded (D-49 corrects
+  the earlier claim here). Persist the new token before its first use.
+- **Uploads use resumable upload sessions only**, with
+  `conflictBehavior=fail`. Simple PUT (documented limit 250MB, checked
+  2026-09-21) defaults to *replace*, so it is not used (D-52).
+- Storage tier is **Microsoft 365 Family (1TB)**, shared with my personal
+  files (D-12, amended). Enforce a per-file size gate (default 50MB — link
+  instead of downloading above it). **Hardcode no quota:** read it from
+  `GET /me/drive` and alert at 80% and 95% of what the drive reports; say so
+  if it cannot be read. **Build no pruning logic.**
 - Capture the OneDrive item ID and the item's **`webUrl`** per file. `webUrl` is
   returned free on upload, is tappable on a phone, opens the OneDrive app, and
   requires my account to be signed in.
@@ -339,6 +343,9 @@ items (                        -- announcements, assignments, grades, comments, 
 )
 
 files (                        -- Phase 4: download state. Detection lives in items (D-47)
+                               -- As built: migrations/0008_files.sql (D-52) adds attempts,
+                               -- content_sha1, mime_class, skipped_type, route_reroutable;
+                               -- text/version columns arrive with Phases 6-7.
   id TEXT PRIMARY KEY,         -- hash of (context_id, 'file', canvas_file_id) = the file's items.id
   context_id INTEGER, canvas_file_id INTEGER,
   display_name TEXT, normalised_stem TEXT,
@@ -450,10 +457,14 @@ skipped. The others commit normally. Never wrap the whole run in one
 transaction.
 
 ### Idempotency and download atomicity
-1. Insert the `files` row as `pending` **before** downloading.
-2. Stream to a temp buffer/`.part`, verify against `Content-Length`.
-3. Upload to OneDrive; on success capture item ID and `webUrl`.
-4. Mark `complete`.
+1. Insert the `files` row as `pending`, with its route and target path,
+   **before** downloading. Increment `attempts` before each try (D-52).
+2. Download into memory (bounded by the size gate), verify against
+   `Content-Length` and Canvas's size.
+3. If `attempts > 1` and an identical file (size + SHA-1) is already at the
+   target path, adopt it. Otherwise upload via a session with
+   `conflictBehavior=fail`; capture item ID and `webUrl`.
+4. Mark `complete`. After 5 failed attempts, stop and alert once.
 
 Any crash leaves either a `pending` row the next run retries, or a complete file
 with a complete row. There is no state where the DB claims a file exists and it
@@ -493,7 +504,7 @@ filename contains "assignment"|"project"       -> Assignments
 (no match)                                     -> _unsorted
 ```
 
-Target tree: `Canvas/<term>/<module_code>/<target_folder>/`.
+Target tree: `<root>/<term>/<module_code>/<target_folder>/` (root per D-51).
 
 **`_unsorted` is the pressure valve.** Anything unmatched goes there and appears
 in the notification flagged as needing a rule. This converts silent misrouting
@@ -811,7 +822,7 @@ Ship and use each phase before starting the next. **Do not build ahead.**
 | 1 | `npm run discover` (§16), mapping table, coverage detection, section resolution, `enrollment_state=completed` probe | `courses.seed.json` reviewed and loaded; coverage correct for every module |
 | 2 | Announcements + assignments + submissions/feedback ingest. **Notification only, no downloading.** Section-override fixture captured first. | Runs a week; alerts feel correct and timely |
 | 3 | Files + modules fallback + **group files** (group announcements cut, D-36/D-47). Coverage transitions visible. Still no downloading. | New files detected reliably, zero false positives |
-| 4 | OneDrive upload, atomicity, size gate, resumable upload, **seed routing defaults** (D-40), one-off **prior-term backfill** command (D-36) | Files land correctly and are verified |
+| 4 | OneDrive upload, atomicity, size gate, resumable upload, **seed routing defaults** (D-40), one-off **prior-term backfill** command (D-36), **confinement guard** (D-50) | Files land correctly and are verified; nothing outside the root is touched |
 | 5 | Routing rules, `_unsorted` flow, `--replay` | Most files route correctly; misroutes are visible |
 | 6 | `npm run tune-patterns`, then answer follow-ups | Patterns confirmed against real history; tracking works end to end |
 | 7 | Versioning Tiers 1–3, reconciliation command, FTS5 search | No duplicate confusion |
@@ -896,12 +907,12 @@ otherwise file every early download under `_unsorted` permanently.
 
 | Question | Decision |
 |---|---|
-| Folder tree | `Canvas/<term>/<module_code>/<category>/`. Categories: `Lectures`, `Tutorials`, `Labs`, `Readings`, `Assignments`, `_unsorted`. |
+| Folder tree | `<root>/<term>/<module_code>/<category>/`, where `<root>` is `Apps/<app registration name>/` (AppFolder) or `onedrive_root_folder` (full scope), D-51. Categories: `Lectures`, `Tutorials`, `Labs`, `Readings`, `Assignments`, `Group`, `_unsorted`. |
 | Notification channel | Telegram bot. One chat for content, a second chat ID for operational alerts. |
 | Hosting | GitHub Actions on a **public** repo, adaptive cadence: every 20 min 08:00–23:00 SGT, hourly overnight, expressed as two UTC cron entries. Keep-alive step mandatory. Drift instrumented from Phase 0; revisit at the Phase 2 review. |
 | Dashboard | Not in v1. Phase 8 only, and only if notification alone proves insufficient. Build nothing that assumes a UI exists. |
 | Semester-end archive | Keep permanently. NUS revokes access to concluded courses, so this becomes the only copy. |
-| Storage | **Microsoft 365 Basic, 100GB, funded.** Permanent retention is paid for, not assumed. Track usage and alert at 80%; build no pruning logic. |
+| Storage | **Microsoft 365 Family, 1TB, funded, shared with personal files** (D-12 amended). Permanent retention is paid for, not assumed. Read the quota from Graph and alert at 80%; hardcode no quota; build no pruning logic. |
 | Size gate | 50MB. Above that, record metadata and send the Canvas link without downloading. Skip video MIME types entirely regardless of size — lecture recordings live in Panopto and are not worth the quota. |
 | Multi-user | Never. Single user, my data, no auth layer. |
 

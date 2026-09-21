@@ -167,6 +167,14 @@ export class CanvasClient {
     return this.http.list<CanvasFolder>(`/${kind}/${id}/folders`);
   }
 
+  /**
+   * One file object, re-fetched immediately before a download: its `url`
+   * carries a verifier that expires, so it is never stored (SPEC.md section 4).
+   */
+  getFile(kind: FileContextKind, contextId: number, fileId: number): Promise<Result<CanvasFile>> {
+    return this.http.get<CanvasFile>(`/${kind}/${contextId}/files/${fileId}`);
+  }
+
   /** The modules fallback, used only when /files is denied (SPEC.md section 4). */
   listModules(courseId: number): Promise<Result<CanvasModule[]>> {
     return this.http.list<CanvasModule>(`/courses/${courseId}/modules`, { 'include[]': ['items'] });

@@ -21,11 +21,13 @@ Single user. No accounts, no sharing, no dashboard before Phase 8.
 - [`DECISIONS.md`](DECISIONS.md) — every deviation from the original draft, with
   reasoning.
 
-**Current phase: 3 — file detection, built.** Phase 2 (announcements,
-assignments, grades, feedback) has run for a week. Phase 3 adds a notification
-when a file appears, including one nobody announced, for courses and project
-groups. It is still detection only: downloading and the archive are Phase 4,
-which has a deadline (DECISIONS.md D-36).
+**Current phase: 4 — the OneDrive archive, built, not yet live.** Phases 2–3
+(announcements, assignments, grades, feedback, file detection) are live. Phase 4
+downloads each new file into my personal OneDrive, under
+`<term>/<module>/<category>/`, and adds "→ Labs · OneDrive" to its
+notification once the upload is verified. It never touches anything outside its
+own root folder: every request goes through an allowlist guard, and a test
+checks the wire (DECISIONS.md D-50). It is off until `archive_enabled` is set.
 
 **Deploying a phase that adds a migration: run `npm run migrate` first, then
 push.** `sync` refuses to run against a schema behind its code, so pushing first
@@ -38,7 +40,8 @@ atomic: all or nothing.
 
 **Only the poller writes to the OneDrive synced folder.**
 
-Editing, renaming, or moving a file inside `Canvas/` on a machine where OneDrive
+Editing, renaming, or moving a file inside the archive root (`Apps/Canvas Archive/`
+by default) on a machine where OneDrive
 is syncing produces conflict copies (`Week 6 Slides-DESKTOP-ABC.pdf`) and breaks
 the assumption that a `files` row marked `complete` describes what is actually on
 disk. Read from the folder freely. Write to it from nowhere but this program.
@@ -108,7 +111,9 @@ deliverable.
 | `npm run discover` | Probe coverage and write `courses.seed.json` for review. Refuses to overwrite without `--overwrite`. |
 | `npm run seed-courses` | Load the reviewed seed file. Idempotent; rejects an enabled course with no module code. |
 | `npm run telegram-test` | Send one test message to each Telegram chat. |
-| `npm run sync` | One polling run. `-- --dry-run` previews the messages it would send. |
+| `npm run sync` | One polling run. `-- --dry-run` previews the messages it would send, and makes no OneDrive request. |
+| `npm run graph-login` | Sign in to OneDrive (device code). `-- --scope full` for the contingency scope (D-51). |
+| `npm run backfill-course -- <canvas_course_id>` | Archive one course's files once, including a disabled prior-term course (D-36). |
 | `npm run check` | Typecheck and run the test suite. |
 
 Every command accepts `--dry-run`: all reads happen, every intended write is
@@ -164,6 +169,28 @@ In this order — each step is safe to stop after.
 7. *(Recommended)* **Dead-man's switch.** Create a healthchecks.io check —
    period 1 hour, grace 2 hours — and `npm run set-config healthcheck_url`. It is
    the only thing that notices if runs stop altogether (DECISIONS.md D-44).
+
+## Going live (Phase 4)
+
+1. **Register the app** (once; DECISIONS.md D-51 for the scope choice). In the
+   Microsoft Entra admin center, *App registrations → New registration*: name it
+   **`Canvas Archive`** (this names the `Apps/` folder, and renaming later does
+   not rename the folder), supported account types **Personal Microsoft
+   accounts only**, no redirect URI. Then *Authentication → Advanced settings →
+   Allow public client flows: Yes*. Copy the **Application (client) ID**.
+2. `npm run set-config graph_client_id` — paste the ID.
+3. **`npm run migrate`** — adds the `files` table. Then push.
+4. **`npm run graph-login`** — sign in with the *personal* account. It checks the
+   drive is personal and prints the quota, or says it is not readable.
+   If it reports "read-only" or "pending provisioning", that is the 2026
+   AppFolder regression; the workaround is printed (D-51).
+5. **`npm run sync -- --dry-run`**, then
+   `npm run set-config archive_enabled` → `true`. The next scheduled run archives
+   what is already on Canvas, a batch at a time, and sends one "Saved to
+   OneDrive" summary.
+6. *(D-36)* `npm run backfill-course -- <canvas_course_id>` for the prior-term course.
+
+Revoke the app at any time at account.live.com/consent/Manage.
 
 ## Privacy posture
 

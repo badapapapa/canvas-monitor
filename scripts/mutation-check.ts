@@ -29,6 +29,9 @@ interface Mutation {
 }
 
 const SYNC = 'test/unit/sync.test.ts';
+const PURE = 'test/unit/archive-pure.test.ts';
+const GRAPH = 'test/unit/graph.test.ts';
+const ARCHIVE = 'test/unit/archive.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -100,6 +103,67 @@ const MUTATIONS: Mutation[] = [
     from: '`${webBase}/${kind}/${context.canvasId}/files/${f.id}`,',
     to: 'String((f as unknown as { url: string }).url),',
     tests: [SYNC],
+  },
+  // Write verbs and item-id addressing are each refused in more than one
+  // independent place in the guard (by name, by the GET/POST allowlist, by
+  // the per-action verb check, by the root-prefix rule), so no single-line
+  // edit disables them. The bugs that could are these two: a request that
+  // skips the guard, and a guard that approves everything.
+  {
+    name: 'send a Graph request without the guard checking it (D-50)',
+    file: 'src/graph/drive.ts',
+    from: 'this.o.guard.check({ method, url, headers, ...(payload === undefined ? {} : { body: payload }) });',
+    to: '',
+    tests: [PURE],
+  },
+  {
+    name: 'a guard that approves everything (D-50: the confinement guarantee)',
+    file: 'src/graph/guard.ts',
+    from: '  check(req: GuardedRequest): void {\n',
+    to: '  check(req: GuardedRequest): void {\n    if (req.url !== "") return;\n',
+    tests: [PURE, GRAPH],
+  },
+  {
+    name: 'let the guard accept an upload session that replaces',
+    file: 'src/graph/guard.ts',
+    from: "if (props[CONFLICT_PARAM] !== 'fail') throw new GuardError('an upload session without conflictBehavior=fail');",
+    to: '',
+    tests: [PURE],
+  },
+  {
+    name: 'upload with conflictBehavior=replace (never overwrite, SPEC.md section 5)',
+    file: 'src/graph/drive.ts',
+    from: "{ item: { '@microsoft.graph.conflictBehavior': 'fail', name, fileSize: bytes.length } },",
+    to: "{ item: { '@microsoft.graph.conflictBehavior': 'replace', name, fileSize: bytes.length } },",
+    tests: [GRAPH, ARCHIVE],
+  },
+  {
+    name: 'send the bearer token to the pre-authenticated upload URL',
+    file: 'src/graph/drive.ts',
+    from: "this.o.guard.check({ method: 'PUT', url: uploadUrl, headers });",
+    to: "headers['authorization'] = `Bearer ${await this.o.tokens.get()}`; this.o.guard.check({ method: 'PUT', url: uploadUrl, headers });",
+    tests: [GRAPH],
+  },
+  {
+    name: 'show the route and link before the archive has verified the file',
+    file: 'src/notify/render.ts',
+    from: "if (f.archiveState !== 'complete' || f.route === null || f.route === undefined) return '';",
+    to: "if (f.route === null || f.route === undefined) return '';",
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'count the archive attempt only after it succeeds (a crash loop retries forever)',
+    file: 'src/archive/stage.ts',
+    from: 'sql: `UPDATE files SET attempts = attempts + 1, download_state = \'pending\' WHERE id = ?`,',
+    to: 'sql: `UPDATE files SET download_state = \'pending\' WHERE id = ?`,',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'use the rotated refresh token without saving it (D-49)',
+    file: 'src/graph/auth.ts',
+    from: 'await this.options.saveRefreshToken(json.refresh_token);',
+    to: '',
+    tests: [GRAPH, ARCHIVE],
   },
 ];
 

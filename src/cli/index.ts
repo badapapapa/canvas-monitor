@@ -27,6 +27,8 @@ import { runDiscoverCommand } from './discover.ts';
 import { runSeedCourses } from './seed-courses.ts';
 import { runSyncCommand } from './sync.ts';
 import { runTelegramTest } from './telegram-test.ts';
+import { runGraphLogin } from './graph-login.ts';
+import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
 const USAGE = `
@@ -41,6 +43,8 @@ Commands:
   seed-courses [path]      Load the reviewed seed file into contexts and courses.
   sync                     One polling run: ingest, alert, deliver. --dry-run previews messages.
   telegram-test            Send a test message to both Telegram chats.
+  graph-login              Connect OneDrive (device code sign-in, personal accounts only).
+  backfill-course <id>     Archive one course's files once, without polling it (D-36).
   set-config <key>         Set a config value, read from stdin (never argv).
   config-list              Show config keys and whether they are set.
   prune-raw                Delete raw captures past their retention window.
@@ -72,6 +76,7 @@ async function main(argv: string[]): Promise<number> {
         'dry-run': { type: 'boolean', default: false },
         json: { type: 'boolean', default: false },
         'from-env': { type: 'boolean', default: false },
+        scope: { type: 'string' },
         out: { type: 'string' },
         overwrite: { type: 'boolean', default: false },
         'unsafe-log': { type: 'boolean', default: false },
@@ -139,6 +144,10 @@ async function main(argv: string[]): Promise<number> {
       );
     case 'telegram-test':
       return await withRun('telegram-test', dryRun, unsafeLog, async (ctx) => runTelegramTest(ctx));
+    case 'graph-login':
+      return await withRun('graph-login', dryRun, unsafeLog, async (ctx) => runGraphLogin(ctx, { scope: values.scope }));
+    case 'backfill-course':
+      return await withRun('backfill-course', dryRun, unsafeLog, async (ctx) => runBackfillCourse(ctx, { courseId: positionals[1] }));
     case 'seed-courses':
       return await withRun('seed-courses', dryRun, unsafeLog, async (ctx) => {
         await runSeedCourses(ctx, { path: positionals[1] });

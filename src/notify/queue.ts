@@ -16,7 +16,7 @@ import { sha256 } from '../ingest/normalise.ts';
 import { isQuietHours, quietHoursReleaseAt } from '../core/time.ts';
 import type { Db, TxHandle } from '../core/db/writer.ts';
 import type { Logger } from '../core/log.ts';
-import { render, renderDigest, type ContentPayload, type OpsPayload, type Payload, type WatchingPayload } from './render.ts';
+import { render, renderDigest, type ContentPayload, type NoticePayload, type OpsPayload, type Payload, type WatchingPayload } from './render.ts';
 import type { TelegramClient } from './telegram.ts';
 
 /** After this many retryable failures a notification is marked failed. */
@@ -92,6 +92,40 @@ export async function enqueueWatching(
   });
 }
 
+/** A one-off content-chat notice, e.g. "archive caught up". Keyed by `sendKey`. */
+export async function enqueueNotice(tx: Writer, args: { sendKey: string; payload: NoticePayload; now: Date }): Promise<void> {
+  await tx.write.execute('enqueue notice', {
+    sql: `INSERT INTO notifications
+            (batch_key, channel, context_id, state, urgent, release_after, created_at, item_ids, payload)
+          VALUES (?, 'content', NULL, 'queued', 0, ?, ?, '[]', ?)
+          ON CONFLICT(batch_key) DO NOTHING`,
+    args: [sha256(`notice\n${args.sendKey}`), releaseAfter(args.now, false), args.now.toISOString(), JSON.stringify(args.payload)],
+  });
+}
+
+/**
+ * Join each file in a content payload to its archive state, at send time.
+ * The archive stage runs before the flush in the same sync, so a file
+ * uploaded in this run already carries its OneDrive link (D-52).
+ */
+async function enrichFiles(db: Db, payload: Payload): Promise<void> {
+  if (payload.kind !== 'content') return;
+  const ids = payload.items.filter((i) => i.resourceType === 'file' && i.itemId !== undefined).map((i) => i.itemId as string);
+  if (ids.length === 0) return;
+  const rows = await db.read({
+    sql: `SELECT id, route_category, share_url, download_state FROM files WHERE id IN (${ids.map(() => '?').join(', ')})`,
+    args: ids,
+  });
+  const byId = new Map(rows.rows.map((r) => [String(r['id']), r]));
+  for (const item of payload.items) {
+    const row = item.itemId === undefined ? undefined : byId.get(item.itemId);
+    if (row === undefined || item.file === undefined) continue;
+    item.file.route = row['route_category'] === null ? null : String(row['route_category']);
+    item.file.archiveUrl = row['share_url'] === null ? null : String(row['share_url']);
+    item.file.archiveState = String(row['download_state']);
+  }
+}
+
 export async function enqueueOps(tx: Writer, args: { sendKey: string; payload: OpsPayload; now: Date }): Promise<void> {
   await tx.write.execute('enqueue ops alert', {
     sql: `INSERT INTO notifications
@@ -157,6 +191,7 @@ export async function flush(
     attempts: Number(r['attempts'] ?? 0),
     payload: JSON.parse(String(r['payload'])) as Payload,
   }));
+  for (const row of rows) await enrichFiles(env.db, row.payload);
 
   // Group into send units: one per notification, except that content held
   // through quiet hours is merged into a single morning digest.

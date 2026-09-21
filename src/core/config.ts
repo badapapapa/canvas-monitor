@@ -84,6 +84,59 @@ export const CONFIG_SPEC = {
     pattern: /^https:\/\/\S+$/,
     formatHint: 'an https:// URL',
   },
+  // --- Phase 4: OneDrive archive ---------------------------------------------
+  graph_client_id: {
+    secret: false,
+    description: 'Application (client) ID of the app registered for my PERSONAL Microsoft account.',
+    pattern: /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    formatHint: 'a GUID like 00001111-aaaa-2222-bbbb-3333cccc4444',
+  },
+  graph_refresh_token: {
+    secret: true,
+    description: 'Written by `npm run graph-login` and rotated on every run. Not normally set by hand.',
+  },
+  graph_scope: {
+    secret: false,
+    description: "'appfolder' (Files.ReadWrite.AppFolder: Apps/<app name>) or 'full' (Files.ReadWrite: a named root folder).",
+    default: 'appfolder',
+    pattern: /^(appfolder|full)$/,
+    formatHint: 'appfolder or full',
+  },
+  onedrive_root_folder: {
+    secret: false,
+    description: "The archive's root folder in the drive root. Used only when graph_scope is 'full'.",
+    default: 'Canvas Archive',
+    pattern: /^[^"*:<>?/\\|]{1,60}$/,
+    formatHint: 'a single folder name, no slashes',
+  },
+  archive_enabled: {
+    secret: false,
+    description: 'Download and archive files to OneDrive during sync. Off until graph-login has succeeded.',
+    default: 'false',
+    pattern: /^(true|false)$/,
+    formatHint: 'true or false',
+  },
+  archive_max_file_bytes: {
+    secret: false,
+    description: 'Size gate (SPEC.md section 16): larger files are linked, not downloaded.',
+    default: '52428800',
+    pattern: /^\d{1,12}$/,
+    formatHint: 'bytes, e.g. 52428800 for 50 MB',
+  },
+  archive_max_files_per_run: {
+    secret: false,
+    description: 'Per-run cap, so a backlog is worked through over several runs inside the 10-minute timeout.',
+    default: '40',
+    pattern: /^\d{1,4}$/,
+    formatHint: 'a whole number',
+  },
+  archive_max_bytes_per_run: {
+    secret: false,
+    description: 'Per-run byte cap, for the same reason.',
+    default: '419430400',
+    pattern: /^\d{1,12}$/,
+    formatHint: 'bytes',
+  },
 } as const satisfies Record<string, KeySpec>;
 
 export type ConfigKey = keyof typeof CONFIG_SPEC;
@@ -110,6 +163,11 @@ export class Config {
       values.set(String(row['key']), String(row['value']));
     }
     return new Config(values);
+  }
+
+  /** Update the in-memory value after persisting it (e.g. a rotated token). */
+  override(key: ConfigKey, value: string): void {
+    this.values.set(key, value);
   }
 
   get(key: ConfigKey): string | undefined {

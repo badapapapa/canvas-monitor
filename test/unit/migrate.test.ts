@@ -101,7 +101,7 @@ describe('0007 rebuilds items and watermarks without losing data', () => {
 
     for (const f of await readdir(MIGRATIONS)) await cp(path.join(MIGRATIONS, f), path.join(dir, f));
     const outcome = await migrate(client, silentLogger(), clock, { dryRun: false, dir });
-    assert.deepEqual(outcome.applied, ['0007_file_items']);
+    assert.equal(outcome.applied[0], '0007_file_items', 'the rebuild runs first; later migrations may follow');
 
     const items = await client.execute('SELECT id, title, content_hash, meta, notified_at FROM items ORDER BY id');
     assert.equal(items.rows.length, 25, 'no item may be lost in the rebuild');

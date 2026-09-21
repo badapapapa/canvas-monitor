@@ -17,6 +17,8 @@ import type { ChangeDetail } from '../ingest/classify.ts';
 import type { ResourceType } from '../ingest/normalise.ts';
 
 export interface RenderItem {
+  /** items.id, so a file can be joined to its archive state at send time. */
+  itemId?: string;
   resourceType: ResourceType;
   kind: 'new' | 'revised';
   title: string | null;
@@ -27,7 +29,16 @@ export interface RenderItem {
   otherDueDates?: string[];
   preview?: string;
   grade?: { score: number | null; grade: string | null; pointsPossible: number | null; excused: boolean };
-  file?: { folder: string | null; size: number | null; module: string | null; unlockAt: string | null };
+  file?: {
+    folder: string | null;
+    size: number | null;
+    module: string | null;
+    unlockAt: string | null;
+    /** Filled in at SEND time from the files table, never at enqueue (D-52). */
+    route?: string | null;
+    archiveUrl?: string | null;
+    archiveState?: string | null;
+  };
 }
 
 export interface ContentPayload {
@@ -55,7 +66,14 @@ export interface OpsPayload {
   resolved?: boolean;
 }
 
-export type Payload = ContentPayload | WatchingPayload | OpsPayload;
+/** A one-off informational message to the content chat. */
+export interface NoticePayload {
+  kind: 'notice';
+  title: string;
+  lines: string[];
+}
+
+export type Payload = ContentPayload | WatchingPayload | OpsPayload | NoticePayload;
 
 export function escapeHtml(text: string): string {
   return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -123,6 +141,21 @@ export function humanSize(bytes: number | null): string | null {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Where the file went (SPEC.md section 12): its route, and a OneDrive link
+ * ONLY once the archive has verified it is there. A file still pending shows
+ * nothing extra -- never a link to something that does not exist yet.
+ */
+function archiveSuffix(f: RenderItem['file']): string {
+  if (f === undefined) return '';
+  if (f.archiveState === 'skipped_size') return ' · <i>not archived: over the size limit</i>';
+  if (f.archiveState === 'skipped_type') return ' · <i>not archived: video</i>';
+  if (f.archiveState !== 'complete' || f.route === null || f.route === undefined) return '';
+  const route = f.route === '_unsorted' ? ' → _unsorted ⚠ needs a routing rule' : ` → ${escapeHtml(f.route)}`;
+  const link = f.archiveUrl === null || f.archiveUrl === undefined ? '' : ` · <a href="${escapeAttr(f.archiveUrl)}">OneDrive</a>`;
+  return `${route}${link}`;
 }
 
 function renderItem(item: RenderItem, now: Date): string {
@@ -197,7 +230,7 @@ function renderItem(item: RenderItem, now: Date): string {
         lines.push(`📄 Updated: ${target} — ${escapeHtml(note)}`);
       } else {
         const verb = change?.transition === 'available' ? '📄 Now available: ' : '📄 ';
-        lines.push(`${verb}${target}${detail === '' ? '' : ` — ${escapeHtml(detail)}`}`);
+        lines.push(`${verb}${target}${detail === '' ? '' : ` — ${escapeHtml(detail)}`}${archiveSuffix(f)}`);
       }
       break;
     }
@@ -293,6 +326,8 @@ export function render(payload: Payload, now: Date): string[] {
       return renderWatching(payload);
     case 'ops':
       return renderOps(payload);
+    case 'notice':
+      return pack(`📦 <b>${escapeHtml(payload.title)}</b>`, '📦 continued', payload.lines.map((l) => escapeHtml(l)));
   }
 }
 

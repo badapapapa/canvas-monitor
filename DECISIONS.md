@@ -302,6 +302,17 @@ Permanent retention is now paid for rather than assumed.
 
 **Cost:** a few dollars a month. Cheaper than the failure mode.
 
+**Amended 2026-09-21 (Phase 4; also corrects SPEC §5 and §16, review item M2).**
+The account is **Microsoft 365 Family, 1TB**, not Basic. And it is my real
+OneDrive, already holding ~123GB of personal files — so the archive shares the
+drive, and a hardcoded denominator would be wrong twice over (wrong size, and
+blind to everything else on the drive). **No quota is hardcoded.** Each run
+reads `quota.total`/`quota.used` from `GET /me/drive` and alerts at 80%
+(warning) and 95% (critical) of what the drive itself reports, and pages when an
+upload is refused for quota (507). If the quota is not readable — likely under
+the AppFolder scope, D-51 — that is said once (`storage@unreadable`) rather than
+the alert silently never firing. Still no pruning logic.
+
 ---
 
 ## D-28 — ANSWERED: there is no accessible history · settled 2026-09-10
@@ -1375,3 +1386,158 @@ project created exists in the scratchpad, the repo or the system temp directory
 (the only `.db` files there belong to a Chromium profile). The Canvas token's
 actual value appears in none of the 4,094 files scanned in those locations, nor
 anywhere in git history or the object database.
+
+---
+
+## D-49 — Graph auth: refresh tokens are not revoked on use; persist before use · applied 2026-09-21
+
+**SPEC §5 was wrong on a detail that matters.** It says each exchange
+"invalidates the old one". Microsoft's refresh-token page (updated 2026-06-15)
+says the platform **doesn't revoke old refresh tokens when used** to get new
+access tokens; each has a 90-day lifetime (personal accounts), and the client
+is told to discard the old one. The rule SPEC draws from it still holds — save
+the new token or the chain eventually dies — but the failure is slower and
+quieter than SPEC claims: an unsaved rotation works until the old token ages
+out, then fails with `invalid_grant`.
+
+**As built (`src/graph/auth.ts`):**
+- The rotated refresh token is written to `config` **before** the new access
+  token is cached or used. If the write fails, the run stops with the old token
+  still valid. There is no single database transaction spanning an HTTP call,
+  so "same transaction as its use" is implemented as "persisted before first
+  use", which is the property that transaction was protecting.
+- Sign-in is the **device code flow** against the `/consumers` authority
+  (personal accounts only) as a **public client**: no client secret, no
+  redirect URI. The guard refuses `/common` and `/organizations`.
+- `invalid_grant`, `interaction_required` and `consent_required` are a
+  `graph_auth` ops alert (page once, D-42), fixed by `npm run graph-login`.
+  Notification never waits for the archive: files are still announced, just
+  without a OneDrive link.
+
+---
+
+## D-50 — Confinement is structural: a request guard, and a test that watches the wire · applied 2026-09-21
+
+My OneDrive holds ~123GB of personal files. The requirement: the app never
+reads, modifies, moves or deletes anything outside its own root. That is
+enforced by code that cannot be bypassed from the archive layer, not by
+convention.
+
+**`RequestGuard` (`src/graph/guard.ts`)** is consulted before every network
+request to Microsoft. It is an allowlist of exactly five request shapes:
+`GET /me/drive` (quota and drive type, `$select` only); `GET` an item by path
+under the root; `POST …:/children` to create a *folder* with
+`conflictBehavior=fail`; `POST …:/createUploadSession` with
+`conflictBehavior=fail` in body and URL, item name matching the path, no
+`deferCommit`/`sourceUrl`; and `PUT`/`GET` on an upload URL the app itself was
+handed, **without** an Authorization header. Everything else throws before a
+byte leaves: `PUT`/`PATCH`/`DELETE` to Graph (refused in three independent
+places), addressing by item id (an id can name any file on the drive), any path
+not under the root prefix, non-canonical or unsafe segments, traversal in any
+encoding, unknown query parameters and unknown hosts. In folder mode the only
+write outside the root is creating the root folder itself, by exact name.
+
+**The Microsoft hostnames appear in one source file**, and every `fetch` in
+`src/graph/` is preceded by a guard check. Both are asserted by a test that
+reads the source, so a new code path cannot quietly skip the guard.
+
+**Tests, written independently of the guard:** the fake Graph server
+(`test/helpers/fake-graph.ts`) is seeded with stand-ins for personal files
+(including a decoy folder whose name starts with the root's name). The
+confinement test runs every flow — success, conflict, throttling, dropped
+connections, lost sessions — then checks each recorded request against its own
+from-scratch definition of "inside the root", and checks that a snapshot of
+everything outside the root is byte-identical. The end-to-end archive tests
+repeat the snapshot check across whole syncs. `mutation-check` covers "a
+request skips the guard", "a guard that approves everything", "an upload
+session that replaces" and "a bearer token sent to the upload URL".
+
+**Never overwrite** is layered on top: uploads go only through upload sessions
+with `conflictBehavior=fail` (a simple PUT's default is *replace*, per the
+driveItem docs), and a name clash is archived alongside as
+`name (uploaded YYYY-MM-DD).ext`, never over the existing file.
+
+---
+
+## D-51 — Files.ReadWrite.AppFolder vs Files.ReadWrite · assessed 2026-09-21, decision is mine
+
+Both are delegated, need no admin consent, and support personal accounts. The
+code supports both (`graph_scope`: `appfolder` | `full`); the guard confines
+either way. What differs is what *Microsoft* enforces if my code, or a leaked
+token, misbehaves.
+
+**AppFolder (default).** Files live in `Apps/<app registration name>/`. The
+folder is named at first use and not renamed if the registration is later
+renamed. Microsoft limits the token to that folder server-side. That matters
+because the refresh token sits in plaintext in Turso (D-06): under
+`Files.ReadWrite` a leaked token reads and deletes my whole drive for 90 days;
+under AppFolder it reaches only the archive.
+
+Costs, in practice:
+1. **A live regression.** Microsoft Q&A thread 5983388 (posted 2026-08-23,
+   still reported 2026-09-08, no Microsoft response): newly consented
+   AppFolder-only apps on personal OneDrive get `403 serviceReadOnly` or
+   `503 itemDisabledDueToPendingProvisioning` on every drive call. The
+   user-reported workaround is to consent to `Files.ReadWrite` once, then
+   revoke it at account.live.com/consent/Manage; that reportedly fixes the
+   app/user pair permanently. The workaround briefly grants the broad scope.
+   The code recognises both errors by name and raises a specific alert
+   (`graph_provisioning`) with the workaround in it.
+2. **Quota is probably unreadable.** `GET /me/drive` lists `Files.Read` as least
+   privilege for personal accounts; AppFolder is not listed. The code does not
+   assume either way: an unreadable quota is `storage@unreadable`, said once.
+   A full drive still pages via the 507 on upload. At 123GB of 1TB this is the
+   cheapest cost.
+3. **Location.** The archive sits under `Apps/`, not at the drive root. Cosmetic
+   only; the webUrl links work the same way.
+
+**Files.ReadWrite (contingency).** Archive root is a named top-level folder
+(`onedrive_root_folder`, default `Canvas Archive`), and the quota is readable.
+Only my guard stands between a bug and my personal files.
+
+**Recommendation:** AppFolder, falling back to `full` only if the regression
+blocks the app and the workaround fails. The choice is made at sign-in
+(`npm run graph-login [--scope full]`), not at registration.
+
+---
+
+## D-52 — Phase 4 as built: the archive stage · applied 2026-09-21
+
+- **Order in a sync:** detection → archive → stale alerts → flush. Notifications
+  are **enriched when they are sent**, not when queued: a file announced in the
+  same run as its upload carries "→ Labs · OneDrive", and the route and link
+  appear **only once the upload is verified** (`download_state = complete`).
+  A file that failed or is pending shows neither. Files over the size gate or
+  of video type say so ("not archived: over the size limit" / "video").
+- **Atomicity (SPEC §7):** the route and target path are reserved in a `files`
+  row before any network work; `attempts` is incremented **before** each try, so
+  a crash loop is counted and ends at 5 with one `archive_exhausted` alert. On a
+  retry, a file already at the target path with the same size and SHA-1 is
+  **adopted** rather than uploaded again.
+- **Downloads:** the Canvas file object is re-fetched right before download (the
+  verifier URL is never stored); size is checked against Canvas's figure and
+  Content-Length; SHA-256 and SHA-1 are recorded. Files are held in memory,
+  bounded by the 50MB gate.
+- **Uploads:** sessions only, 5 MiB fragments (16 × 320 KiB), resumed from
+  `nextExpectedRanges` after a dropped connection, restarted once if the session
+  is lost, 429/503 honoured with Retry-After. The 250MB simple-PUT limit
+  (driveItem PUT docs, checked 2026-09-21) is recorded here as SPEC §5 asked,
+  but simple PUT is **not used**: its default is replace.
+- **Budget:** at most 40 files / 400MB / 240s per run; a backlog drains over
+  successive runs, newest first. Files already on Canvas when first seen are
+  baselined silently (D-41), so archiving that backlog sends no per-file
+  messages; any run that archives ≥10 files sends one "Saved to OneDrive"
+  summary so the backlog is not invisible.
+- **Routing:** seed rules as code (D-40), matched on whole words in the Canvas
+  folder, then module name, then filename. Group files go to `Group`. Anything
+  unmatched goes to `_unsorted` and is marked re-routable once. Rules move to
+  data in Phase 5.
+- **Drive type:** the stage refuses anything but `driveType: personal`
+  (`onedrive_not_personal`), so a sign-in with the NUS account cannot archive
+  into the NUS tenant.
+- **`--dry-run`** makes no Graph request at all, not even a token exchange.
+- **Backfill (D-36):** `npm run backfill-course -- <canvas_course_id>` archives a
+  course once, including a disabled prior-term one, with no per-file messages.
+
+**Phase 6 note:** the 2026-09-18 file was a real answer-sheet upload, and a
+"Suggested Solutions" file is now live evidence for `tune-patterns`.

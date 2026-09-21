@@ -40,6 +40,11 @@ function summaryOf(o: SyncOutcome): Record<string, unknown> {
     sent: o.flush?.sent ?? 0,
     held: o.flush?.stillHeld ?? 0,
     alerts: o.alerts,
+    // Counts only: the JSON summary is printed under CI, where stdout is public.
+    archive: o.archive === null ? null : {
+      archived: o.archive.archived.length, adopted: o.archive.adopted, skipped: o.archive.skipped,
+      failed: o.archive.failed, planned: o.archive.planned, stopped: o.archive.stopped,
+    },
   };
 }
 
@@ -54,8 +59,24 @@ function line(o: SyncOutcome): string {
     o.flush !== null && o.flush.stillHeld > 0 ? `${o.flush.stillHeld} held for quiet hours` : null,
     o.alerts !== null && o.alerts.raised.length > 0 ? `${o.alerts.raised.length} alert(s) raised` : null,
     o.alerts !== null && o.alerts.resolved.length > 0 ? `${o.alerts.resolved.length} resolved` : null,
+    archiveLine(o),
   ];
   return parts.filter((p) => p !== null).join(', ');
+}
+
+function archiveLine(o: SyncOutcome): string | null {
+  const a = o.archive;
+  if (a === null) return null;
+  const bits = [
+    a.planned > 0 ? `${a.planned} would archive` : null,
+    a.archived.length > 0 ? `${a.archived.length} archived` : null,
+    a.adopted > 0 ? `${a.adopted} adopted` : null,
+    a.skipped > 0 ? `${a.skipped} skipped` : null,
+    a.failed > 0 ? `${a.failed} failed` : null,
+    a.stopped !== null && a.stopped !== 'budget' ? `stopped: ${a.stopped}` : null,
+    a.stopped === 'budget' ? 'more next run' : null,
+  ].filter((b) => b !== null);
+  return bits.length === 0 ? null : `OneDrive: ${bits.join(', ')}`;
 }
 
 function preview(ctx: RunContext, o: SyncOutcome): void {

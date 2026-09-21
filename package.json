@@ -22,7 +22,9 @@
     "sync": "node src/cli/index.ts sync",
     "telegram-test": "node src/cli/index.ts telegram-test",
     "mutation-check": "node scripts/mutation-check.ts",
-    "leak-check": "node scripts/leak-check.ts"
+    "leak-check": "node scripts/leak-check.ts",
+    "graph-login": "node src/cli/index.ts graph-login",
+    "backfill-course": "node src/cli/index.ts backfill-course"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

@@ -38,10 +38,15 @@ import {
   type ResourceType,
 } from '../ingest/normalise.ts';
 import { reconcileAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
-import { enqueueContent, enqueueOps, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
-import { formatSgt, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
+import { enqueueContent, enqueueNotice, enqueueOps, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
+import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
+import { runArchive, type ArchiveOutcome } from '../archive/stage.ts';
+import { TokenProvider } from '../graph/auth.ts';
+import { GraphDrive } from '../graph/drive.ts';
+import { RequestGuard, SCOPES, type RootSpec } from '../graph/guard.ts';
+import { setConfig } from '../core/config.ts';
 import type { CoverageStatus } from '../discover/coverage.ts';
 import { loadMigrations } from '../core/db/migrate.ts';
 import { ping } from './healthcheck.ts';
@@ -85,6 +90,9 @@ interface Watermark {
 export interface SyncOptions {
   /** Test seam: point the Telegram client at a local fake. */
   telegramApiBase?: string;
+  /** Test seams: point Graph and the Microsoft login at a local fake. */
+  graphBase?: string;
+  loginBase?: string;
 }
 
 export interface SyncOutcome {
@@ -97,6 +105,7 @@ export interface SyncOutcome {
   flush: FlushOutcome | null;
   /** What this run decided to enqueue, for the --dry-run preview. */
   planned: Payload[];
+  archive: ArchiveOutcome | null;
 }
 
 export async function runSync(ctx: RunContext, options: SyncOptions = {}): Promise<SyncOutcome> {
@@ -118,7 +127,7 @@ export async function runSync(ctx: RunContext, options: SyncOptions = {}): Promi
 
   let outcome: SyncOutcome = empty('failed');
   try {
-    outcome = await syncBody(ctx, config, telegram, chats);
+    outcome = await syncBody(ctx, config, telegram, chats, options);
     return outcome;
   } finally {
     if (!ctx.dryRun) await releaseLock(ctx.db, ctx.runId).catch(() => undefined);
@@ -152,8 +161,96 @@ async function assertSchemaCurrent(ctx: RunContext): Promise<void> {
   }
 }
 
+/** A run that archives this many files (usually a silent backlog, D-41) sends one summary. */
+const BACKFILL_NOTICE_THRESHOLD = 10;
+
+function buildDrive(ctx: RunContext, config: Config, options: SyncOptions): GraphDrive {
+  const scope = config.get('graph_scope') === 'full' ? 'full' : 'appfolder';
+  const root: RootSpec = scope === 'full' ? { mode: 'folder', name: config.require('onedrive_root_folder') } : { mode: 'appfolder' };
+  const guard = new RequestGuard({
+    root,
+    ...(options.graphBase === undefined ? {} : { graphBase: options.graphBase }),
+    ...(options.loginBase === undefined ? {} : { loginBase: options.loginBase }),
+  });
+  const tokens = new TokenProvider({
+    clientId: config.require('graph_client_id'),
+    scope: SCOPES[root.mode],
+    guard,
+    log: ctx.log,
+    clock: ctx.clock,
+    refreshToken: () => config.require('graph_refresh_token'),
+    // Persisted before the new access token is used (D-49). Local copy updated
+    // too, so a second exchange in the same run presents the newest token.
+    saveRefreshToken: async (token) => {
+      await setConfig(ctx.db, ctx.clock, 'graph_refresh_token', token);
+      config.override('graph_refresh_token', token);
+    },
+    ...(options.loginBase === undefined ? {} : { loginBase: options.loginBase }),
+  });
+  return new GraphDrive({
+    root,
+    guard,
+    tokens,
+    log: ctx.log,
+    clock: ctx.clock,
+    ...(options.graphBase === undefined ? {} : { graphBase: options.graphBase }),
+  });
+}
+
+/** Operational alerts the archive stage can raise. The `storage@` family is a ladder. */
+function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
+  const out: AlertCondition[] = [];
+  if (a.stopped === 'graph_auth') {
+    out.push({
+      key: 'graph_auth',
+      severity: 'critical',
+      summary: 'OneDrive access has expired or been revoked. Files are not being archived.',
+      detail: 'Sign in again: npm run graph-login',
+    });
+  }
+  if (a.stopped === 'provisioning') {
+    out.push({
+      key: 'graph_provisioning',
+      severity: 'critical',
+      summary: 'OneDrive refuses this app as read-only or "pending provisioning". Files are not being archived.',
+      detail:
+        'A known Microsoft regression since Aug 2026 for newly consented AppFolder-only apps (DECISIONS.md D-51). ' +
+        'User-reported workaround: npm run graph-login -- --scope full once, remove the app at ' +
+        'https://account.live.com/consent/Manage, then npm run graph-login again.',
+    });
+  }
+  if (a.stopped === 'not_personal') {
+    out.push({ key: 'onedrive_not_personal', severity: 'critical', summary: 'Signed in to a drive that is not a personal OneDrive. Archiving refused.', detail: a.stopDetail ?? '' });
+  }
+  if (a.stopped === 'quota_full') {
+    out.push({ key: 'storage@full', severity: 'critical', summary: 'OneDrive is full: uploads are being refused (507).' });
+  } else if (a.quota === 'unreadable') {
+    out.push({
+      key: 'storage@unreadable',
+      severity: 'warn',
+      summary: 'OneDrive quota is not readable with this scope, so the 80% storage alert is off.',
+      detail: 'A full drive still alerts, from the upload itself. Expected under Files.ReadWrite.AppFolder (D-51).',
+      remindEveryMs: null,
+    });
+  } else if (a.quota !== null && a.quota.total > 0) {
+    const used = a.quota.used / a.quota.total;
+    const pct = `${Math.round(used * 100)}% of ${humanSize(a.quota.total)}`;
+    if (used >= 0.95) out.push({ key: 'storage@95', severity: 'critical', summary: `OneDrive is ${pct} full.` });
+    else if (used >= 0.8) out.push({ key: 'storage@80', severity: 'warn', summary: `OneDrive is ${pct} full.`, remindEveryMs: null });
+  }
+  if (a.exhausted > 0) {
+    out.push({
+      key: 'archive_exhausted',
+      severity: 'warn',
+      summary: `${a.exhausted} file${a.exhausted === 1 ? '' : 's'} could not be archived after 5 attempts.`,
+      detail: "See: SELECT display_name, last_error FROM files WHERE download_state = 'failed'",
+    });
+  }
+  return out;
+}
+
 function empty(status: SyncOutcome['status']): SyncOutcome {
-  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [] };
+  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null };
 }
 
 function buildTelegram(config: Config, ctx: RunContext, options: SyncOptions): TelegramClient | null {
@@ -188,6 +285,7 @@ async function syncBody(
   config: Config,
   telegram: TelegramClient | null,
   chats: { content: string; ops: string } | null,
+  options: SyncOptions,
 ): Promise<SyncOutcome> {
   const now = ctx.clock.now();
   const outcome = empty('ok');
@@ -296,6 +394,35 @@ async function syncBody(
   if (baselinedScope.length > 0) {
     outcome.planned.push(watching);
     await enqueueWatching(ctx.db, { scopeKey: baselinedScope.sort().join(','), payload: watching, now });
+  }
+
+  // --- archive (Phase 4): after detection, BEFORE the flush, so a file
+  // uploaded in this run already carries its OneDrive link when sent (D-52).
+  if (config.getBoolean('archive_enabled', false)) {
+    const drive = ctx.dryRun ? null : buildDrive(ctx, config, options);
+    outcome.archive = await runArchive({ ctx, canvas, canvasToken: config.require('canvas_token'), drive, config });
+    if (!ctx.dryRun) {
+      alerts.push(...archiveAlerts(outcome.archive));
+      evaluatedPrefixes.push('graph_auth', 'graph_provisioning', 'onedrive_not_personal', 'archive_exhausted');
+      // Storage is judged only when this run actually reached the drive.
+      if (outcome.archive.quota !== null || outcome.archive.stopped === 'quota_full') evaluatedPrefixes.push('storage@');
+    }
+    const archived = outcome.archive.archived;
+    if (archived.length >= BACKFILL_NOTICE_THRESHOLD) {
+      const bytes = archived.reduce((n, a) => n + a.bytes, 0);
+      await enqueueNotice(ctx.db, {
+        sendKey: `archive ${ctx.runId}`,
+        payload: {
+          kind: 'notice',
+          title: 'Saved to OneDrive',
+          lines: [
+            `${archived.length} files (${humanSize(bytes)}) archived this run.`,
+            outcome.archive.stopped === 'budget' ? 'More are queued and will follow over the next runs.' : 'The archive is up to date.',
+          ],
+        },
+        now,
+      });
+    }
   }
 
   alerts.push(...(await staleContextAlerts(ctx, contexts, coverageNow, now)));
@@ -595,7 +722,7 @@ async function syncContext(
       : {
           kind: 'content',
           contextLabel: context.label,
-          items: toNotify.map(renderItemOf),
+          items: toNotify.map((c) => renderItemOf(c, context.contextId)),
           ...(coverage === 'modules_only'
             ? { note: 'Read through Modules: the Files tab is hidden, so files not linked in a module are missed.' }
             : {}),
@@ -660,10 +787,11 @@ async function syncContext(
   };
 }
 
-function renderItemOf(c: Classified): RenderItem {
+function renderItemOf(c: Classified, contextId: number): RenderItem {
   const r = c.record;
   const facts = r.meta['facts'] as { score?: number | null; grade?: string | null; excused?: boolean } | undefined;
   return {
+    itemId: itemId(contextId, r.resourceType, r.externalId),
     resourceType: r.resourceType,
     kind: c.kind === 'new' ? 'new' : 'revised',
     title: r.title,
