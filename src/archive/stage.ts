@@ -126,6 +126,7 @@ export async function runArchive(deps: {
   const { ctx, config } = deps;
   const log = ctx.log.child({ stage: 'archive' });
   const started = ctx.clock.now().getTime();
+  const canvasOrigin = new URL(config.require('canvas_base_url')).origin;
   const maxFileBytes = config.getNumber('archive_max_file_bytes', 50 * 1024 * 1024);
   const maxFiles = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_files_per_run', 40);
   const maxBytes = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_bytes_per_run', 400 * 1024 * 1024);
@@ -211,6 +212,7 @@ export async function runArchive(deps: {
         contextCanvasId: c.contextCanvasId,
         fileId: c.canvasFileId,
         token: deps.canvasToken,
+        canvasOrigin,
         maxBytes: maxFileBytes,
         ...(deps.fetchImpl === undefined ? {} : { fetchImpl: deps.fetchImpl }),
       });

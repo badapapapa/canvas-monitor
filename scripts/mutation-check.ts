@@ -165,6 +165,13 @@ const MUTATIONS: Mutation[] = [
     to: '',
     tests: [GRAPH, ARCHIVE],
   },
+  {
+    name: 'attach the NUS token to any download URL, whatever its origin (Phase 0 worst case)',
+    file: 'src/archive/download.ts',
+    from: "if (url.origin === options.canvasOrigin) headers['authorization'] = `Bearer ${options.token}`;",
+    to: "headers['authorization'] = `Bearer ${options.token}`;",
+    tests: [ARCHIVE],
+  },
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));

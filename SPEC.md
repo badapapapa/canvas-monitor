@@ -289,6 +289,12 @@ That is a property of the HTTP client, not of our code. Swapping in axios, got,
 or node-fetch would leak the token on every download. A test asserts the
 stripping behaviour against a real redirect. Do not delete it.
 
+**Enforced in our code too (Phase 4, D-52):** the archive's downloader follows
+redirects by hand and attaches the token only to a request whose origin is
+the configured Canvas origin, on every hop. A download URL on any other origin,
+whether handed back directly or reached by redirect, gets no Authorization
+header. This does not depend on the HTTP client or on Canvas's behaviour.
+
 ---
 
 ## 6. Data model

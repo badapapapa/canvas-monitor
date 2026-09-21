@@ -1516,7 +1516,13 @@ blocks the app and the workaround fails. The choice is made at sign-in
   **adopted** rather than uploaded again.
 - **Downloads:** the Canvas file object is re-fetched right before download (the
   verifier URL is never stored); size is checked against Canvas's figure and
-  Content-Length; SHA-256 and SHA-1 are recorded. Files are held in memory,
+  Content-Length; SHA-256 and SHA-1 are recorded. The NUS token is attached only
+  to requests on the configured Canvas origin: redirects are followed by hand
+  and each hop is decided in code. An earlier draft sent the token to whatever
+  URL Canvas returned and relied on the redirect stripping it. A test caught it
+  sending the token straight to a foreign origin, and the fix was first made in
+  the fake rather than the code. Both cases are now tested, plus a
+  mutation-check entry. Files are held in memory,
   bounded by the 50MB gate.
 - **Uploads:** sessions only, 5 MiB fragments (16 × 320 KiB), resumed from
   `nextExpectedRanges` after a dropped connection, restarted once if the session

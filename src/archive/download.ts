@@ -3,9 +3,12 @@
  *
  * The file object's `url` carries a time-limited verifier, so the object is
  * re-fetched immediately before every download and the URL is never stored.
- * The download redirects to Canvas's storage host on another origin; Node's
- * fetch drops the Authorization header across origins, so the NUS token is
- * not sent there (pinned by test/unit/canvas-http.test.ts).
+ * The download redirects to Canvas's storage host on another origin. The NUS
+ * token is attached ONLY to a request whose origin is the configured Canvas
+ * origin, decided here on every hop: redirects are followed by hand, never by
+ * fetch. This does not rely on Canvas always handing back its own origin, nor
+ * on the HTTP client stripping the header (which test/unit/canvas-http.test.ts
+ * still pins, as a second layer).
  *
  * Files are at most 50 MB (the size gate), so they are held in memory rather
  * than streamed to a `.part` file -- verified against Canvas's reported size
@@ -26,6 +29,8 @@ export async function downloadCanvasFile(options: {
   contextCanvasId: number;
   fileId: number;
   token: string;
+  /** The configured Canvas origin; the only origin that ever sees the token. */
+  canvasOrigin: string;
   maxBytes: number;
   fetchImpl?: typeof fetch;
 }): Promise<DownloadResult> {
@@ -45,11 +50,7 @@ export async function downloadCanvasFile(options: {
 
   let response: Response;
   try {
-    response = await (options.fetchImpl ?? fetch)(url, {
-      headers: { authorization: `Bearer ${options.token}` },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(120_000),
-    });
+    response = await fetchWithTokenOnlyForCanvas(url, options);
   } catch (error) {
     return { kind: 'error', detail: `download failed: ${error instanceof Error ? error.message : String(error)}` };
   }
@@ -69,4 +70,29 @@ export async function downloadCanvasFile(options: {
     sha256: createHash('sha256').update(bytes).digest('hex'),
     sha1: createHash('sha1').update(bytes).digest('hex').toUpperCase(),
   };
+}
+
+const MAX_REDIRECTS = 5;
+
+/**
+ * Follows redirects by hand so that each hop's credentials are decided by this
+ * code: the bearer token for the Canvas origin, nothing for any other.
+ */
+async function fetchWithTokenOnlyForCanvas(
+  start: string,
+  options: { token: string; canvasOrigin: string; fetchImpl?: typeof fetch },
+): Promise<Response> {
+  const doFetch = options.fetchImpl ?? fetch;
+  const deadline = AbortSignal.timeout(120_000);
+  let url = new URL(start);
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop += 1) {
+    const headers: Record<string, string> = {};
+    if (url.origin === options.canvasOrigin) headers['authorization'] = `Bearer ${options.token}`;
+    const response = await doFetch(url, { headers, redirect: 'manual', signal: deadline });
+    const location = response.headers.get('location');
+    if (response.status < 300 || response.status > 399 || location === null) return response;
+    await response.body?.cancel();
+    url = new URL(location, url);
+  }
+  throw new Error(`more than ${MAX_REDIRECTS} redirects`);
 }

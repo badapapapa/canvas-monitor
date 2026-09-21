@@ -52,7 +52,7 @@ function bytesFor(id: number, size: number): Buffer {
 let canvasUrlValue = '';
 const canvasUrl = () => canvasUrlValue;
 
-async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = {}) {
+async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = {}, opts: { directStorage?: boolean } = {}) {
   const files: FakeFile[] = [];
   const brokenStorage = new Set<number>();
   const storageAuth: Array<string | undefined> = [];
@@ -72,7 +72,11 @@ async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = 
     id: f.id, display_name: f.name, filename: f.name, size: f.size, folder_id: f.folder,
     created_at: '2026-09-18T12:03:00Z', updated_at: '2026-09-18T12:03:00Z', modified_at: '2026-09-18T12:03:00Z',
     hidden_for_user: false, locked_for_user: false, upload_status: 'success', mime_class: f.mime ?? 'pdf',
-    url: `${canvasUrl()}/files/${f.id}/download?download_frd=1&verifier=v${f.id}`,
+    // Real Canvas hands back a URL on its own origin that redirects to storage.
+    // `directStorage` models a Canvas that hands back the storage URL itself.
+    url: opts.directStorage === true
+      ? `${storage.url}/files/${f.id}/blob?verifier=v${f.id}`
+      : `${canvasUrl()}/files/${f.id}/download?download_frd=1&verifier=v${f.id}`,
   });
   const canvasAuth: Array<string | undefined> = [];
   const canvas = await startServer((req, res) => {
@@ -231,7 +235,7 @@ describe('Phase 4 archive, end to end', () => {
     assert.deepEqual(h.graph.filesUnder(h.ROOT), []);
   });
 
-  it('never sends the Canvas token to the storage host', async () => {
+  it('sends the Canvas token to Canvas and not across the redirect to storage', async () => {
     h.files.push({ id: 1, name: 'Lecture 06.pdf', size: 1000, folder: 7 });
     await h.sync();
     assert.deepEqual(h.canvasAuth, ['Bearer canvas-token'], 'Canvas itself gets the token');
@@ -343,5 +347,17 @@ describe('Phase 4 archive: failures are loud, and never block notification', () 
     assert.equal(Number(row.rows[0]?.['attempts']), 5);
     assert.equal(h.storageAuth.length, 5, 'no sixth download');
     assert.equal(ops(h).filter((t) => t.includes('could not be archived after 5 attempts')).length, 1);
+  });
+});
+
+describe('Phase 4 archive: the NUS token goes to the Canvas origin and nowhere else', () => {
+  it('sends no token when Canvas hands back a URL on another origin directly', async () => {
+    const h = await harness({}, { directStorage: true });
+    h.files.push({ id: 1, name: 'Lecture 06.pdf', size: 1000, folder: 7 });
+    await h.sync();
+    assert.equal(h.canvasAuth.length, 0, 'the download never touched the Canvas origin');
+    assert.equal(h.storageAuth.length, 1);
+    assert.equal(h.storageAuth[0], undefined, 'a foreign origin never gets the bearer token');
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Lectures/Lecture 06.pdf`), bytesFor(1, 1000), 'and the download still works');
   });
 });
