@@ -26,9 +26,11 @@ import type { RunContext } from '../core/run-context.ts';
 import { messageOf } from '../core/errors.ts';
 import { toSgtParts } from '../core/time.ts';
 import { GraphError } from '../graph/auth.ts';
-import type { GraphDrive, Quota } from '../graph/drive.ts';
+import type { DriveItem, GraphDrive, Quota } from '../graph/drive.ts';
+import { GuardError } from '../graph/guard.ts';
 import type { FileFacts } from '../ingest/normalise.ts';
 import { downloadCanvasFile } from './download.ts';
+import { quickXorHash } from './quickxor.ts';
 import { alternateName, fitPath, safeSegment } from './filename.ts';
 import { route, type Category } from './route.ts';
 
@@ -49,6 +51,19 @@ export interface ArchiveOutcome {
   stopDetail: string | null;
   quota: Quota | 'unreadable' | null;
   exhausted: number;
+  /** One entry per failed attempt: where it failed and why, with no names (SPEC section 2). */
+  failures: ArchiveFailure[];
+}
+
+export type ArchiveStep = 'download' | 'folder' | 'upload' | 'verify' | 'record';
+
+export interface ArchiveFailure {
+  step: ArchiveStep;
+  /** Machine code only: a GraphError category, a download reason, 'guard' or 'internal'. */
+  code: string;
+  status: number | null;
+  /** Graph's own error code, when it is a bare identifier. */
+  graphCode: string | null;
 }
 
 interface Candidate {
@@ -131,7 +146,7 @@ export async function runArchive(deps: {
   const maxFiles = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_files_per_run', 40);
   const maxBytes = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_bytes_per_run', 400 * 1024 * 1024);
   const maxMs = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : 240_000;
-  const out: ArchiveOutcome = { archived: [], adopted: 0, skipped: 0, failed: 0, planned: 0, stopped: null, stopDetail: null, quota: null, exhausted: 0 };
+  const out: ArchiveOutcome = { archived: [], adopted: 0, skipped: 0, failed: 0, planned: 0, stopped: null, stopDetail: null, quota: null, exhausted: 0, failures: [] };
 
   // Check the drive before touching any file: this is where a dead refresh
   // token, the AppFolder provisioning regression, or a non-personal drive shows.
@@ -208,6 +223,16 @@ export async function runArchive(deps: {
       args: [c.itemId],
     });
 
+    let step: ArchiveStep = 'download';
+    const fail = async (failure: ArchiveFailure, detail: string): Promise<void> => {
+      await recordFailure(ctx, c.itemId, detail);
+      out.failed += 1;
+      out.failures.push(failure);
+      // One line per failure, safe for the public Actions log: the item id is a
+      // hash (D-23), and nothing here carries a name, path or URL.
+      log.warn('archive.failed', { item: c.itemId, attempt: priorAttempts + 1, ...failure });
+    };
+
     try {
       const download = await downloadCanvasFile({
         canvas: deps.canvas,
@@ -225,22 +250,29 @@ export async function runArchive(deps: {
         continue;
       }
       if (download.kind !== 'ok') {
-        await recordFailure(ctx, c.itemId, `${download.kind}: ${download.detail}`);
-        out.failed += 1;
+        const status = /^http_(\d{3})$/.exec(download.reason);
+        await fail({ step, code: download.reason, status: status === null ? null : Number(status[1]), graphCode: null }, `${download.kind}: ${download.detail}`);
         continue;
       }
       filesThisRun += 1;
       bytesThisRun += download.bytes.length;
+      const localXor = quickXorHash(download.bytes);
+      // Personal OneDrive reports only quickXorHash (no SHA-1, D-54): size AND
+      // hash must match before anything already there is treated as this file.
+      const isThisFile = (item: DriveItem | null): boolean =>
+        item !== null && item.size === download.bytes.length && item.file?.hashes?.quickXorHash === localXor;
 
+      step = 'folder';
       await deps.drive.ensureFolders(dirs);
+      step = 'upload';
 
       let finalSegments = segments;
-      let result: { id: string; webUrl?: string } | null = null;
+      let result: DriveItem | null = null;
 
       // A previous attempt may have uploaded this file before dying: adopt it.
       if (priorAttempts > 0) {
         const existing = await deps.drive.itemAt(segments);
-        if (existing !== null && existing.size === download.bytes.length && sameHash(existing.file?.hashes?.sha1Hash, download.sha1)) {
+        if (isThisFile(existing)) {
           result = existing;
           out.adopted += 1;
         }
@@ -263,13 +295,21 @@ export async function runArchive(deps: {
           // The name is taken. If it is this very file (a crashed earlier
           // run), adopt it; otherwise try the next name. Never overwrite.
           const existing = await deps.drive.itemAt(finalSegments);
-          if (existing !== null && existing.size === download.bytes.length && sameHash(existing.file?.hashes?.sha1Hash, download.sha1)) {
+          if (isThisFile(existing)) {
             result = existing;
             out.adopted += 1;
           }
         }
       }
       if (result === null) throw new Error(`every name up to ${MAX_ALTERNATES} alternates was taken`);
+
+      // Verify what landed, by OneDrive's own hash of it, before calling it archived.
+      step = 'verify';
+      const landed = isThisFile(result) ? result : await deps.drive.itemAt(finalSegments);
+      if (!isThisFile(landed)) {
+        throw new GraphError('malformed', `uploaded item does not match: size ${landed?.size ?? 'none'}, quickXorHash ${landed?.file?.hashes?.quickXorHash === undefined ? 'absent' : 'differs'}`, null, 'verifyMismatch');
+      }
+      step = 'record';
 
       await ctx.db.write.execute('archive complete', {
         sql: `UPDATE files SET download_state = 'complete', target_path = ?, content_sha256 = ?, content_sha1 = ?,
@@ -282,8 +322,7 @@ export async function runArchive(deps: {
       log.info('archive.complete', { item: c.itemId, bytes: download.bytes.length, category: segments[2] as Category });
     } catch (error) {
       const stop = stopFor(error);
-      await recordFailure(ctx, c.itemId, messageOf(error));
-      out.failed += 1;
+      await fail(failureOf(step, error), messageOf(error));
       if (stop.stopped !== null) {
         out.stopped = stop.stopped;
         out.stopDetail = stop.stopDetail;
@@ -297,14 +336,25 @@ export async function runArchive(deps: {
   log.info('archive.summary', {
     archived: out.archived.length, adopted: out.adopted, skipped: out.skipped, failed: out.failed,
     planned: out.planned, stopped: out.stopped, exhausted: out.exhausted,
+    failures: tallyFailures(out.failures),
   });
   return out;
 }
 
-function sameHash(remote: string | undefined, local: string): boolean {
-  // Where OneDrive reports a SHA-1, it must match; where it does not, size
-  // alone decides (hash availability on personal OneDrive is not documented).
-  return remote === undefined || remote.toUpperCase() === local;
+function failureOf(step: ArchiveStep, error: unknown): ArchiveFailure {
+  if (error instanceof GraphError) return { step, code: error.code, status: error.status, graphCode: error.graphCode };
+  if (error instanceof GuardError) return { step, code: 'guard', status: null, graphCode: null };
+  return { step, code: 'internal', status: null, graphCode: null };
+}
+
+/** `"folder server 400 invalidRequest" -> 32`: the shape of a run's failures, no names. */
+export function tallyFailures(failures: readonly ArchiveFailure[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const f of failures) {
+    const key = [f.step, f.code, f.status ?? '', f.graphCode ?? ''].filter((p) => p !== '').join(' ');
+    out[key] = (out[key] ?? 0) + 1;
+  }
+  return out;
 }
 
 function stopFor(error: unknown): { stopped: ArchiveStop | null; stopDetail: string | null } {

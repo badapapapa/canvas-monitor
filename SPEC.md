@@ -251,6 +251,10 @@ is deleted some months after graduation.
 - **Refresh tokens rotate.** Microsoft returns a new refresh token with each
   exchange; the old one is *not* revoked but must be discarded (D-49 corrects
   the earlier claim here). Persist the new token before its first use.
+- **Where the service departs from the docs (observed 2026-09-21, D-54):**
+  folders under the app folder are created by parent item id (path forms
+  return 400); upload sessions omit `fileSize` (400 on personal OneDrive);
+  content is verified by `quickXorHash`, the only hash personal OneDrive returns.
 - **Uploads use resumable upload sessions only**, with
   `conflictBehavior=fail`. Simple PUT (documented limit 250MB, checked
   2026-09-21) defaults to *replace*, so it is not used (D-52).

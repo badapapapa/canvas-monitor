@@ -36,7 +36,9 @@ export interface Quota {
  */
 export const CHUNK_BYTES = 16 * 320 * 1024;
 
-const CONFLICT_QUERY = `?${encodeURIComponent('@microsoft.graph.conflictBehavior')}=fail`;
+// conflictBehavior goes in the request BODY only. As a query parameter, real
+// Graph rejects folder creation with 400 invalidRequest (observed 2026-09-21,
+// DECISIONS.md D-54); the docs list it as a body property for both calls.
 
 export interface GraphDriveOptions {
   root: RootSpec;
@@ -58,19 +60,20 @@ interface GraphErrorBody {
 function classify(status: number, body: GraphErrorBody, context: string): GraphError {
   const code = body.error?.code ?? '';
   const inner = body.error?.innerError?.code ?? '';
+  const graphCode = code === '' ? null : inner === '' ? code : `${code}/${inner}`;
   const message = `${context}: ${status} ${code}${inner ? `/${inner}` : ''} ${body.error?.message ?? ''}`.trim();
   // The 2026 regression on personal OneDrive: newly consented AppFolder-only
   // apps are read-only or "pending provisioning" (DECISIONS.md D-51).
   if (inner === 'serviceReadOnly' || code === 'itemDisabledDueToPendingProvisioning' || inner === 'itemDisabledDueToPendingProvisioning') {
-    return new GraphError('provisioning', message, status);
+    return new GraphError('provisioning', message, status, graphCode);
   }
-  if (status === 401) return new GraphError('auth', message, status);
-  if (status === 403) return new GraphError('forbidden', message, status);
-  if (status === 404) return new GraphError('not_found', message, status);
-  if (status === 409) return new GraphError('conflict', message, status);
-  if (status === 507) return new GraphError('quota', message, status);
-  if (status === 429) return new GraphError('throttled', message, status);
-  return new GraphError('server', message, status);
+  if (status === 401) return new GraphError('auth', message, status, graphCode);
+  if (status === 403) return new GraphError('forbidden', message, status, graphCode);
+  if (status === 404) return new GraphError('not_found', message, status, graphCode);
+  if (status === 409) return new GraphError('conflict', message, status, graphCode);
+  if (status === 507) return new GraphError('quota', message, status, graphCode);
+  if (status === 429) return new GraphError('throttled', message, status, graphCode);
+  return new GraphError('server', message, status, graphCode);
 }
 
 function retryAfterMs(response: Response): number {
@@ -84,7 +87,8 @@ export class GraphDrive {
   private readonly base: string;
   private readonly doFetch: typeof fetch;
   private readonly wait: (ms: number) => Promise<void>;
-  private readonly knownFolders = new Set<string>();
+  /** Folder path (lower-cased) -> item id, for folders confirmed to exist. */
+  private readonly knownFolders = new Map<string, string>();
 
   constructor(options: GraphDriveOptions) {
     this.o = options;
@@ -117,7 +121,12 @@ export class GraphDrive {
         throw new GraphError('network', `${method} ${path}: ${error instanceof Error ? error.message : String(error)}`);
       }
 
-      if (response.ok) return (await response.json()) as T;
+      if (response.ok) {
+        const json: unknown = await response.json();
+        // The guard learns folder ids only from responses to requests it approved (D-54).
+        this.o.guard.observe({ method, url, headers, ...(payload === undefined ? {} : { body: payload }) }, response.status, json);
+        return json as T;
+      }
       const errorBody = (await response.json().catch(() => ({}))) as GraphErrorBody;
 
       if (response.status === 401 && !refreshed) {
@@ -150,7 +159,7 @@ export class GraphDrive {
         name: this.o.root.name,
         folder: {},
         '@microsoft.graph.conflictBehavior': 'fail',
-      }, CONFLICT_QUERY);
+      });
       return this.request<DriveItem>('GET', rootedPath(this.o.root, []));
     }
   }
@@ -183,21 +192,32 @@ export class GraphDrive {
 
   // --- writes: create only ---------------------------------------------------
 
-  /** Create each missing folder along the path. Never replaces anything. */
+  /**
+   * Create each missing folder along the path. Never replaces anything.
+   *
+   * Folders are created under their parent's item id: real Graph refuses (400)
+   * every path-addressed folder create under the app folder (D-54). The guard
+   * allows that only for ids it saw Graph return for folders inside the root.
+   */
   async ensureFolders(segments: readonly string[]): Promise<void> {
+    let parentId = this.knownFolders.get('') ?? (await this.rootItem()).id;
+    this.knownFolders.set('', parentId);
     for (let depth = 1; depth <= segments.length; depth += 1) {
       const path = segments.slice(0, depth);
       const key = path.join('/').toLowerCase();
-      if (this.knownFolders.has(key)) continue;
+      const known = this.knownFolders.get(key);
+      if (known !== undefined) {
+        parentId = known;
+        continue;
+      }
 
       let item = await this.itemAt(path);
       if (item === null) {
         try {
           item = await this.request<DriveItem>(
             'POST',
-            rootedPath(this.o.root, path.slice(0, -1), 'children'),
+            `/me/drive/items/${encodeURIComponent(parentId)}/children`,
             { name: path[path.length - 1], folder: {}, '@microsoft.graph.conflictBehavior': 'fail' },
-            CONFLICT_QUERY,
           );
         } catch (error) {
           // Lost a race with ourselves or found it after all: re-read.
@@ -208,7 +228,8 @@ export class GraphDrive {
       if (item === null || item.folder === undefined) {
         throw new GraphError('conflict', `"${path.join('/')}" exists and is not a folder`);
       }
-      this.knownFolders.add(key);
+      this.knownFolders.set(key, item.id);
+      parentId = item.id;
     }
   }
 
@@ -225,8 +246,9 @@ export class GraphDrive {
       const created = await this.request<{ uploadUrl?: string }>(
         'POST',
         rootedPath(this.o.root, segments, 'createUploadSession'),
-        { item: { '@microsoft.graph.conflictBehavior': 'fail', name, fileSize: bytes.length } },
-        CONFLICT_QUERY,
+        // No `fileSize`: personal OneDrive answers 400 to it, though the docs
+        // list it as personal-only (observed 2026-09-21, D-54).
+        { item: { '@microsoft.graph.conflictBehavior': 'fail', name } },
       );
       if (typeof created.uploadUrl !== 'string') throw new GraphError('malformed', 'createUploadSession returned no uploadUrl');
       this.o.guard.registerUploadUrl(created.uploadUrl);

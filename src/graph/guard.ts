@@ -10,7 +10,9 @@
  *   Graph  GET  /me/drive                        quota only ($select)
  *          GET  <root>                           the root folder itself
  *          GET  <root>:/<safe path>              one item, by path
- *          POST <root>[:/<safe path>]:/children  create a FOLDER, conflictBehavior=fail
+ *          POST /me/drive/items/{id}/children    create a FOLDER, conflictBehavior=fail, and
+ *                                                ONLY under an id this guard has seen Graph
+ *                                                return for a folder inside the root (D-54)
  *          POST <root>:/<safe path>:/createUploadSession   conflictBehavior=fail
  *          POST /me/drive/root/children          folder mode only: create the root folder itself
  *   Upload PUT|GET <an uploadUrl Graph returned in this process>, WITHOUT Authorization
@@ -21,6 +23,11 @@
  *     no move, no delete, no simple upload.
  *   - Addressing by item id (`/items/{id}`): an id can name ANY item in the
  *     drive, which is exactly how code escapes a folder it thinks it is in.
+ *     The one exception is folder creation, which real Graph refuses (400)
+ *     when addressed through special/approot (observed 2026-09-21, D-54). It
+ *     is allowed only under ids the guard itself learned, via `observe()`,
+ *     from Graph's responses to requests it had already approved as inside
+ *     the root. Code outside the guard cannot add an id.
  *   - Any path segment that is not canonical and already safe: no `..`, no
  *     alternative percent-encoding, no separators smuggled inside a segment.
  *   - Any sign-in authority other than /consumers, which admits personal
@@ -65,6 +72,8 @@ export interface GuardOptions {
 }
 
 const CONFLICT_PARAM = '@microsoft.graph.conflictBehavior';
+/** The only id-addressed shape allowed: creating a child folder (D-54). */
+const ID_CHILDREN = /^\/me\/drive\/items\/([^/:]+)\/children$/;
 
 export function rootPrefix(root: RootSpec): string {
   return root.mode === 'appfolder' ? '/me/drive/special/approot' : `/me/drive/root:/${encodeURIComponent(root.name)}`;
@@ -102,6 +111,8 @@ export class RequestGuard {
   private readonly graphBase: string;
   private readonly loginBase: string;
   private readonly uploadUrls = new Set<string>();
+  /** Folder ids Graph returned for requests this guard approved as inside the root. */
+  private readonly rootedFolderIds = new Set<string>();
 
   constructor(options: GuardOptions) {
     this.root = options.root;
@@ -115,6 +126,25 @@ export class RequestGuard {
   /** Only upload URLs Graph itself handed back may ever be written to. */
   registerUploadUrl(url: string): void {
     this.uploadUrls.add(url);
+  }
+
+  /**
+   * Learn a folder id from a successful response. The request is re-checked
+   * here, so only a response to an approved, root-confined request can teach
+   * the guard anything: a rooted GET, or a folder create under a known id.
+   */
+  observe(req: GuardedRequest, status: number, response: unknown): void {
+    if (status < 200 || status > 299 || response === null || typeof response !== 'object') return;
+    const item = response as { id?: unknown; folder?: unknown };
+    if (typeof item.id !== 'string' || item.id === '' || item.folder === undefined || item.folder === null) return;
+    this.check(req);
+    const method = req.method.toUpperCase();
+    const path = req.url.slice(this.graphBase.length).split('?')[0] ?? '';
+    const prefix = rootPrefix(this.root);
+    const rootedGet = method === 'GET' && (path === prefix || path.startsWith(`${prefix}:`) || path.startsWith(`${prefix}/`));
+    const childCreate = method === 'POST' && ID_CHILDREN.test(path);
+    const folderRoot = method === 'POST' && this.root.mode === 'folder' && path === '/me/drive/root/children';
+    if (rootedGet || childCreate || folderRoot) this.rootedFolderIds.add(item.id);
   }
 
   check(req: GuardedRequest): void {
@@ -155,11 +185,25 @@ export class RequestGuard {
       throw new GuardError(`${method} to Graph (this app never overwrites, moves or deletes)`);
     }
     if (method !== 'GET' && method !== 'POST') throw new GuardError(`${method} to Graph`);
+    const byId = ID_CHILDREN.exec(path);
+    if (byId !== null) {
+      let id: string;
+      try {
+        id = decodeURIComponent(byId[1]!);
+      } catch {
+        throw new GuardError('a malformed item id');
+      }
+      if (encodeURIComponent(id) !== byId[1]) throw new GuardError('a non-canonical item id');
+      if (!this.rootedFolderIds.has(id)) throw new GuardError('addressing by an item id not known to be a folder inside the root');
+      if (method !== 'POST') throw new GuardError(`${method} on an item id`);
+      if (query.length > 0) throw new GuardError('query parameters on a folder create');
+      this.requireFolderCreate(parseJson(req.body));
+      return;
+    }
     if (/\/items\//.test(path) || /\/items$/.test(path)) throw new GuardError('addressing by item id');
 
     for (const [key, value] of query) {
       if (key === '$select' && method === 'GET') continue;
-      if (key === CONFLICT_PARAM && value === 'fail') continue;
       throw new GuardError(`query parameter ${key}=${value}`);
     }
 
@@ -174,7 +218,7 @@ export class RequestGuard {
       if (method !== 'POST') throw new GuardError(`${method} /me/drive/root/children`);
       const body = parseJson(req.body);
       if (body['name'] !== this.root.name) throw new GuardError('creating anything in the drive root except the app root folder');
-      this.requireFolderCreate(body, query);
+      this.requireFolderCreate(body);
       return;
     }
 
@@ -191,8 +235,9 @@ export class RequestGuard {
     if (method !== 'POST') throw new GuardError(`${method} ${action}`);
     const body = parseJson(req.body);
     if (action === 'children') {
-      this.requireFolderCreate(body, query);
-      return;
+      // Real Graph answers 400 to every path-addressed folder create under the
+      // app folder (D-54). One route for folders: by a known parent id.
+      throw new GuardError('a folder create addressed by path; use the parent folder id');
     }
     // createUploadSession: the upload MUST fail on a name clash, never replace.
     if (segments.length === 0) throw new GuardError('an upload session for the root itself');
@@ -202,17 +247,15 @@ export class RequestGuard {
     if (props[CONFLICT_PARAM] !== 'fail') throw new GuardError('an upload session without conflictBehavior=fail');
     if (props['name'] !== segments[segments.length - 1]) throw new GuardError('an upload session whose item name disagrees with its path');
     if ('deferCommit' in body || '@microsoft.graph.sourceUrl' in props) throw new GuardError('an upload session with deferCommit or sourceUrl');
-    if (!query.some(([k, v]) => k === CONFLICT_PARAM && v === 'fail')) throw new GuardError('an upload session without conflictBehavior=fail in the URL');
   }
 
-  private requireFolderCreate(body: Record<string, unknown>, query: Array<[string, string]>): void {
+  private requireFolderCreate(body: Record<string, unknown>): void {
     const name = body['name'];
     if (typeof name !== 'string' || safeSegment(name) !== name) throw new GuardError('a folder name that is not a safe segment');
     if (body['folder'] === undefined || 'file' in body || '@microsoft.graph.sourceUrl' in body) {
       throw new GuardError('a children POST that creates anything but an empty folder');
     }
     if (body[CONFLICT_PARAM] !== 'fail') throw new GuardError('a folder create without conflictBehavior=fail');
-    if (!query.some(([k, v]) => k === CONFLICT_PARAM && v === 'fail')) throw new GuardError('a folder create without conflictBehavior=fail in the URL');
   }
 
   /** `rest` is what follows the root prefix. Returns decoded, verified segments. */

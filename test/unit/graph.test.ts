@@ -181,7 +181,7 @@ describe('folder mode', () => {
 // Written independently of the guard, from first principles: given the fake's
 // request log, is every request something this app is allowed to do?
 
-function insideRoot(r: Recorded, root: RootSpec): string | null {
+function insideRoot(r: Recorded, root: RootSpec, fake: FakeGraph, rootPath: string): string | null {
   const path = decodeURIComponent(r.path.split('?')[0] ?? '');
   if (path.startsWith('/login/')) {
     return r.method === 'POST' && path.startsWith('/login/consumers/') ? null : `login ${r.method} ${path}`;
@@ -192,6 +192,14 @@ function insideRoot(r: Recorded, root: RootSpec): string | null {
   }
   if (!['GET', 'POST'].includes(r.method)) return `${r.method} ${path}`;
   if (path === '/v1.0/me/drive') return r.method === 'GET' ? null : `${r.method} /me/drive`;
+  // Folder create by parent id (D-54): allowed only if the FAKE's own records
+  // put that id at or under the root -- independent of what the guard believed.
+  const byId = /^\/v1\.0\/me\/drive\/items\/([^/:]+)\/children$/.exec(path);
+  if (byId !== null) {
+    const where = fake.pathOfId(byId[1]!);
+    if (r.method !== 'POST') return `${r.method} by id`;
+    return where !== null && (where === rootPath || where.startsWith(`${rootPath}/`)) ? null : `id outside root: ${where}`;
+  }
   if (/\/items(\/|$)/.test(path)) return `id addressing: ${path}`;
   if (path.split(/[/:]/).includes('..')) return `traversal: ${path}`;
   const prefix = root.mode === 'appfolder' ? '/v1.0/me/drive/special/approot' : `/v1.0/me/drive/root:/${root.name}`;
@@ -216,7 +224,7 @@ describe('confinement: every request stays inside the root, and personal files a
       await drive.itemAt(['2610', 'AB1234', 'Lectures', 'L01.pdf']);
       await drive.itemAt(['2610', 'does not exist.pdf']);
 
-      const violations = fake.requests.map((r) => insideRoot(r, root)).filter((v): v is string => v !== null);
+      const violations = fake.requests.map((r) => insideRoot(r, root, fake, rootPath)).filter((v): v is string => v !== null);
       assert.deepEqual(violations, [], `requests outside the root:\n${violations.join('\n')}`);
       assert.equal(fake.snapshotOutsideRoot(rootPath), before, 'something outside the root changed');
       assert.ok(fake.requests.length > 10, 'the flows actually ran');

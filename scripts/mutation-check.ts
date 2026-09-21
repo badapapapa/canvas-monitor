@@ -133,8 +133,8 @@ const MUTATIONS: Mutation[] = [
   {
     name: 'upload with conflictBehavior=replace (never overwrite, SPEC.md section 5)',
     file: 'src/graph/drive.ts',
-    from: "{ item: { '@microsoft.graph.conflictBehavior': 'fail', name, fileSize: bytes.length } },",
-    to: "{ item: { '@microsoft.graph.conflictBehavior': 'replace', name, fileSize: bytes.length } },",
+    from: "{ item: { '@microsoft.graph.conflictBehavior': 'fail', name } },",
+    to: "{ item: { '@microsoft.graph.conflictBehavior': 'replace', name } },",
     tests: [GRAPH, ARCHIVE],
   },
   {
@@ -185,6 +185,63 @@ const MUTATIONS: Mutation[] = [
     from: "return stop.stopped === null ? { ...out, stopped: 'unreachable', stopDetail: messageOf(error) } : { ...out, ...stop };",
     to: 'return { ...out, ...stop };',
     tests: [ARCHIVE],
+  },
+  // --- D-54: the first live run ---------------------------------------------
+  {
+    name: 'create folders by path under the app folder again (real Graph: 400, D-54)',
+    file: 'src/graph/drive.ts',
+    from: '`/me/drive/items/${encodeURIComponent(parentId)}/children`,',
+    to: "rootedPath(this.o.root, path.slice(0, -1), 'children'),",
+    tests: [GRAPH, ARCHIVE],
+  },
+  {
+    name: 'send fileSize in the upload session (real personal OneDrive: 400, D-54)',
+    file: 'src/graph/drive.ts',
+    from: "{ item: { '@microsoft.graph.conflictBehavior': 'fail', name } },",
+    to: "{ item: { '@microsoft.graph.conflictBehavior': 'fail', name, fileSize: bytes.length } },",
+    tests: [GRAPH, ARCHIVE],
+  },
+  {
+    name: 'let the guard learn a folder id from any response (an id can name anything)',
+    file: 'src/graph/guard.ts',
+    from: 'if (rootedGet || childCreate || folderRoot) this.rootedFolderIds.add(item.id);',
+    to: 'this.rootedFolderIds.add(item.id);',
+    tests: [PURE],
+  },
+  {
+    name: 'adopt an existing file on size alone (no SHA-1 on personal OneDrive, D-54)',
+    file: 'src/archive/stage.ts',
+    from: 'item !== null && item.size === download.bytes.length && item.file?.hashes?.quickXorHash === localXor;',
+    to: 'item !== null && item.size === download.bytes.length;',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'mark an upload archived without verifying what landed',
+    file: 'src/archive/stage.ts',
+    from: 'if (!isThisFile(landed)) {',
+    to: 'if (false) {',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'count failures without logging why (SPEC 2.1: 32 silent failures)',
+    file: 'src/archive/stage.ts',
+    from: "log.warn('archive.failed', { item: c.itemId, attempt: priorAttempts + 1, ...failure });",
+    to: '',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'wait for per-file limits when every attempt in a run fails',
+    file: 'src/sync/run.ts',
+    from: 'const CORRELATED_FAILURE_MIN = 2;',
+    to: 'const CORRELATED_FAILURE_MIN = 1_000_000;',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'QuickXorHash without the length folded in',
+    file: 'src/archive/quickxor.ts',
+    from: 'out[WIDTH / 8 - 8 + b]! ^= Number(length & 0xffn);',
+    to: 'void out;',
+    tests: ['test/unit/quickxor.test.ts'],
   },
 ];
 

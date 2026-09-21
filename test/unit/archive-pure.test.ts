@@ -129,7 +129,9 @@ const allowed = (guard: RequestGuard, method: string, url: string, body?: unknow
   );
 const session = (name: string) => ({ item: { '@microsoft.graph.conflictBehavior': 'fail', name } });
 const folder = (name: string) => ({ name, folder: {}, '@microsoft.graph.conflictBehavior': 'fail' });
-const FAIL = '?%40microsoft.graph.conflictBehavior=fail';
+const FAIL = '';
+/** Real Graph rejects this with 400 invalidRequest (D-54); the guard refuses it before it is sent. */
+const QUERY_FAIL = '?%40microsoft.graph.conflictBehavior=fail';
 
 describe('OneDrive guard: what is allowed', () => {
   for (const root of [APP, FOLDER]) {
@@ -142,10 +144,36 @@ describe('OneDrive guard: what is allowed', () => {
       allowed(guard, 'GET', `${G}/me/drive?%24select=quota,driveType`);
     });
 
-    it(`[${root.mode}] creates folders and upload sessions that fail on conflict`, () => {
-      allowed(guard, 'POST', `${p([], 'children')}${FAIL}`, folder('2610'));
-      allowed(guard, 'POST', `${p(['2610'], 'children')}${FAIL}`, folder('AB1234'));
-      allowed(guard, 'POST', `${p(['2610', 'AB1234', 'Labs', 'Lab 04.pdf'], 'createUploadSession')}${FAIL}`, session('Lab 04.pdf'));
+    it(`[${root.mode}] creates folders under ids it learned from the root, and upload sessions that fail on conflict`, () => {
+      const g = new RequestGuard({ root });
+      const byId = (id: string) => `${G}/me/drive/items/${encodeURIComponent(id)}/children`;
+      // Unknown until Graph says so, in answer to a request inside the root.
+      refused(g, 'POST', byId('ROOT!1'), folder('2610'));
+      g.observe({ method: 'GET', url: p([]), headers: auth }, 200, { id: 'ROOT!1', folder: {} });
+      allowed(g, 'POST', byId('ROOT!1'), folder('2610'));
+      g.observe({ method: 'POST', url: byId('ROOT!1'), headers: auth, body: JSON.stringify(folder('2610')) }, 201, { id: 'TERM!2', folder: {} });
+      allowed(g, 'POST', byId('TERM!2'), folder('AB1234'));
+      g.observe({ method: 'GET', url: p(['2610', 'AB1234']), headers: auth }, 200, { id: 'MOD!3', folder: {} });
+      allowed(g, 'POST', byId('MOD!3'), folder('Labs'));
+      allowed(g, 'POST', p(['2610', 'AB1234', 'Labs', 'Lab 04.pdf'], 'createUploadSession'), session('Lab 04.pdf'));
+    });
+
+    it(`[${root.mode}] never learns an id from outside the root, from a file, or from a failure`, () => {
+      const g = new RequestGuard({ root });
+      const byId = (id: string) => `${G}/me/drive/items/${encodeURIComponent(id)}/children`;
+      // A response to a request the guard would refuse teaches nothing: observe() re-checks it.
+      assert.throws(() => g.observe({ method: 'GET', url: `${G}/me/drive/root:/Documents`, headers: auth }, 200, { id: 'DOCS', folder: {} }), GuardError);
+      // The drive resource is not a folder inside the root.
+      g.observe({ method: 'GET', url: `${G}/me/drive?%24select=quota,driveType`, headers: auth }, 200, { id: 'DRIVE', folder: {} });
+      // A file, and a failed response, teach nothing.
+      g.observe({ method: 'GET', url: p(['a.pdf']), headers: auth }, 200, { id: 'FILE', file: {} });
+      g.observe({ method: 'GET', url: p(['x']), headers: auth }, 404, { id: 'GONE', folder: {} });
+      for (const id of ['DOCS', 'DRIVE', 'FILE', 'GONE']) refused(g, 'POST', byId(id), folder('x'));
+    });
+
+    it(`[${root.mode}] refuses folder creation by path (real Graph answers 400, D-54)`, () => {
+      refused(guard, 'POST', p([], 'children'), folder('2610'));
+      refused(guard, 'POST', p(['2610'], 'children'), folder('AB1234'));
     });
   }
 
@@ -225,7 +253,7 @@ describe('OneDrive guard: every way out is refused', () => {
     refused(app, 'POST', `${url}${FAIL}`, { item: { '@microsoft.graph.conflictBehavior': 'replace', name: 'x.pdf' } });
     refused(app, 'POST', `${url}${FAIL}`, { item: { '@microsoft.graph.conflictBehavior': 'rename', name: 'x.pdf' } });
     refused(app, 'POST', `${url}${FAIL}`, { item: { name: 'x.pdf' } });
-    refused(app, 'POST', url, session('x.pdf')); // missing the URL-level fail
+    refused(app, 'POST', `${url}${QUERY_FAIL}`, session('x.pdf')); // conflictBehavior as a query parameter (D-54)
     refused(app, 'POST', `${url}?%40microsoft.graph.conflictBehavior=replace`, session('x.pdf'));
     refused(app, 'POST', `${url}${FAIL}`, session('other.pdf'));
     refused(app, 'POST', `${url}${FAIL}`, { ...session('x.pdf'), deferCommit: true });
@@ -236,6 +264,7 @@ describe('OneDrive guard: every way out is refused', () => {
     refused(app, 'POST', url, { name: 'x.pdf', file: {}, '@microsoft.graph.conflictBehavior': 'fail' });
     refused(app, 'POST', url, { name: 'x.pdf', '@microsoft.graph.sourceUrl': 'https://evil', folder: {}, '@microsoft.graph.conflictBehavior': 'fail' });
     refused(app, 'POST', url, { name: 'Labs', folder: {}, '@microsoft.graph.conflictBehavior': 'replace' });
+    refused(app, 'POST', `${url}${QUERY_FAIL}`, { name: 'Labs', folder: {}, '@microsoft.graph.conflictBehavior': 'fail' }); // D-54
   });
 
   it('refuses unknown hosts and unknown query parameters', () => {

@@ -1483,7 +1483,8 @@ Costs, in practice:
    app/user pair permanently. The workaround briefly grants the broad scope.
    The code recognises both errors by name and raises a specific alert
    (`graph_provisioning`) with the workaround in it.
-2. **Quota is probably unreadable.** `GET /me/drive` lists `Files.Read` as least
+2. **Quota is probably unreadable.** *(Wrong: see the 2026-09-21 amendment
+   below. It was readable.)* `GET /me/drive` lists `Files.Read` as least
    privilege for personal accounts; AppFolder is not listed. The code does not
    assume either way: an unreadable quota is `storage@unreadable`, said once.
    A full drive still pages via the 507 on upload. At 123GB of 1TB this is the
@@ -1496,7 +1497,16 @@ Costs, in practice:
 Only my guard stands between a bug and my personal files.
 
 **Recommendation:** AppFolder, falling back to `full` only if the regression
-blocks the app and the workaround fails. The choice is made at sign-in
+blocks the app and the workaround fails.
+
+**Decided 2026-09-21: AppFolder**, with `full` only if the regression blocks
+the app and the workaround fails.
+
+**Amended 2026-09-21, after sign-in:** the quota **is** readable under
+AppFolder. `graph-login` reported 126054.4 MB used of 1053696.0 MB. Cost 2
+above did not happen, so the 80%/95% storage alerts work as designed. The
+regression (cost 1) did not appear either: sign-in and every read worked. The
+first live run failed for a different reason (D-54). The choice is made at sign-in
 (`npm run graph-login [--scope full]`), not at registration.
 
 ---
@@ -1603,3 +1613,82 @@ relationship alive, which is what the documented trigger measures.
 Phase 4) and run `graph-login`. Files already archived stay in OneDrive; a new
 AppFolder app gets its own `Apps/` folder, so new files start in a new tree
 (not verified in practice).
+
+---
+
+## D-54 — The first live archive run: 32 of 32 failed, one cause · fixed 2026-09-21
+
+**What happened.** The first real run (commit fd44421) archived 0 files,
+failed 32, and skipped 1 (347MB, size gate, correct). It raised no alert, and
+the log gave a count with no reasons. `Apps/Canvas Archive/` existed and was
+empty.
+
+**Root cause, reproduced locally against real Canvas and the real OneDrive
+with a single 377-byte file:**
+1. **Downloads were fine.** Four hops; the NUS token went only to the Canvas
+   origin (Canvas → canvas-user-content.com → inscloudgate.net → CDN, token
+   on hop 1 only). Byte count matched. The hop-by-hop code from 876b742 is
+   cleared.
+2. **Not the AppFolder regression.** `GET special/approot` returned 200;
+   the regression's signatures are 403 `serviceReadOnly` / 503.
+3. **Folder creation addressed through `special/approot` is refused.** All 32
+   rows had the same `last_error`:
+   `POST /me/drive/special/approot/children: 400 invalidRequest`. Each variable
+   was isolated in turn:
+   - no `conflictBehavior` query parameter → still 400 (my first hypothesis,
+     falsified);
+   - the minimal body `{name, folder:{}}` → still 400;
+   - `special/approot:/<path>:/children` → 400;
+   - `POST /me/drive/items/{approot-id}/children` (the only form in the
+     create-folder docs) → **201**;
+   - the same form with the query parameter → 409 `nameAlreadyExists`: the
+     parameter is accepted, and `fail` refuses a clash without renaming.
+4. **Uploads would have failed next, hidden behind the folder bug.**
+   `createUploadSession` with `item.fileSize` → **400** in every addressing
+   form, although the docs list `fileSize` as "only available for OneDrive
+   (personal)". Without it: 200, and path addressing works.
+5. **Personal OneDrive reports no SHA-1**, only `quickXorHash`. Adoption was
+   comparing size alone (the fake invented a SHA-1).
+
+Why the tests passed: the fake was built from the docs, and on these three
+points the service departs from them. The fake now records the behaviour
+observed today, not the documented behaviour.
+
+**Fixes:**
+- Folders are created with `POST items/{parent-id}/children`. The guard
+  (D-50) still refuses item-id addressing, with **one exception**: folder
+  creation under an id the guard itself learned from Graph's response to a
+  request it had already approved as inside the root (a rooted GET, or a folder
+  create under a known id). `observe()` re-checks the request, so a response to
+  anything else teaches nothing. Folder creation by path is now refused. The
+  confinement tests check each id against the fake's own records of where
+  that id lives.
+- No `fileSize` in upload sessions. The 507 for a full drive still arrives, on
+  the final fragment.
+- **QuickXorHash** (`src/archive/quickxor.ts`) was checked against OneDrive's
+  own value for the real file (match), and against hand-derived vectors from
+  the published algorithm. Adoption needs size and hash to match, and **every
+  upload is verified** by OneDrive's hash of what landed before it is marked
+  complete.
+- **One log line per failure** (`archive.failed`): step (`download`,
+  `folder`, `upload`, `verify`, `record`), a machine code, HTTP status and
+  Graph's error code. No names, paths or URLs. `archive.summary` carries a
+  tally, e.g. `{"folder server 400 invalidRequest": 32}`.
+- **Correlated failure pages in the same run.** At least 2 attempts, all
+  failed, and nothing archived or adopted raises `archive_all_failed`
+  (critical), naming the dominant step and code. It resolves on the next run
+  that archives something. A single failed attempt is left to the per-file
+  limit of 5, because one attempt cannot show correlation.
+- **Attempts reset** for the 32 rows whose `last_error` carried this signature,
+  in one transaction: before, 32 `failed` with attempts 1 (32 burned); after,
+  32 `pending` with attempts 0, `last_error` noting the reset. The pending row
+  and the size-skipped row were untouched.
+
+**Observed, not yet acted on:** creating an upload session on personal
+OneDrive puts a 0-byte placeholder at the path at once (an experiment left
+`2610/session-probe.bin`). After a crash mid-upload, the retry therefore meets
+a 0-byte item at the name. The hash check refuses to adopt it, and the file
+goes to the dated alternate name. That is safe but untidy. Whether the
+placeholder disappears when the session expires is still to be checked.
+
+Mutation-check entries 22–29 cover each fix.

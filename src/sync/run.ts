@@ -42,7 +42,7 @@ import { enqueueContent, enqueueNotice, enqueueOps, enqueueWatching, flush, type
 import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
-import { runArchive, type ArchiveOutcome } from '../archive/stage.ts';
+import { runArchive, tallyFailures, type ArchiveOutcome } from '../archive/stage.ts';
 import { TokenProvider } from '../graph/auth.ts';
 import { GraphDrive } from '../graph/drive.ts';
 import { RequestGuard, SCOPES, type RootSpec } from '../graph/guard.ts';
@@ -197,6 +197,9 @@ function buildDrive(ctx: RunContext, config: Config, options: SyncOptions): Grap
   });
 }
 
+/** A run with at least this many archive attempts, all failed, is one systemic problem. */
+const CORRELATED_FAILURE_MIN = 2;
+
 const DRIVE_BLOCKING: ReadonlySet<string> = new Set(['graph_auth', 'graph_app', 'provisioning', 'unreachable']);
 
 /**
@@ -268,7 +271,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
       key: 'storage@unreadable',
       severity: 'warn',
       summary: 'OneDrive quota is not readable with this scope, so the 80% storage alert is off.',
-      detail: 'A full drive still alerts, from the upload itself. Expected under Files.ReadWrite.AppFolder (D-51).',
+      detail: 'A full drive still alerts, from the upload itself. It was readable under Files.ReadWrite.AppFolder at sign-in (D-51), so this is a change.',
       remindEveryMs: null,
     });
   } else if (a.quota !== null && a.quota.total > 0) {
@@ -276,6 +279,17 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
     const pct = `${Math.round(used * 100)}% of ${humanSize(a.quota.total)}`;
     if (used >= 0.95) out.push({ key: 'storage@95', severity: 'critical', summary: `OneDrive is ${pct} full.` });
     else if (used >= 0.8) out.push({ key: 'storage@80', severity: 'warn', summary: `OneDrive is ${pct} full.`, remindEveryMs: null });
+  }
+  // Correlated failure: every attempt this run failed. One cause, not N, so it
+  // pages now rather than after five attempts per file or a day of outage.
+  if (a.failed >= CORRELATED_FAILURE_MIN && a.archived.length === 0 && a.adopted === 0) {
+    const shape = Object.entries(tallyFailures(a.failures)).sort((x, y) => y[1] - x[1]);
+    out.push({
+      key: 'archive_all_failed',
+      severity: 'critical',
+      summary: `Every archive attempt this run failed (${a.failed} of ${a.failed}). Nothing was saved to OneDrive.`,
+      detail: shape.slice(0, 3).map(([k, n]) => `${k} ×${n}`).join('; '),
+    });
   }
   if (a.exhausted > 0) {
     out.push({
@@ -444,6 +458,9 @@ async function syncBody(
       alerts.push(...archiveAlerts(outcome.archive));
       alerts.push(...(await driveReachability(ctx, config, outcome.archive, now)));
       evaluatedPrefixes.push('graph_auth', 'graph_app', 'graph_unreachable', 'graph_provisioning', 'onedrive_not_personal', 'archive_exhausted');
+      // Judged only when this run actually tried something; a quiet run leaves it standing.
+      const a = outcome.archive;
+      if (a.archived.length + a.adopted + a.failed > 0) evaluatedPrefixes.push('archive_all_failed');
       // Storage is judged only when this run actually reached the drive.
       if (outcome.archive.quota !== null || outcome.archive.stopped === 'quota_full') evaluatedPrefixes.push('storage@');
     }

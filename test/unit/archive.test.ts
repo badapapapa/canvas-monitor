@@ -13,7 +13,7 @@ import { createClient, type Client } from '@libsql/client';
 import { createDb } from '../../src/core/db/writer.ts';
 import { migrate } from '../../src/core/db/migrate.ts';
 import { Config, setConfig } from '../../src/core/config.ts';
-import { silentLogger } from '../../src/core/log.ts';
+import { createLogger, silentLogger } from '../../src/core/log.ts';
 import type { RunContext } from '../../src/core/run-context.ts';
 import { runSync } from '../../src/sync/run.ts';
 import { startServer, sendJson, type FakeServer } from '../helpers/fake-canvas.ts';
@@ -138,8 +138,9 @@ async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = 
                         VALUES (1, 'course', 10001, 1, 'full', '2026-09-10T00:00:00Z')`);
   await client.execute(`INSERT INTO courses (context_id, canvas_course_id, module_code, term) VALUES (1, 10001, 'AB1234', '2610')`);
 
+  const logLines: string[] = [];
   const ctx = (dryRun = false): RunContext => {
-    const log = silentLogger();
+    const log = createLogger({ runId: 'test', clock, level: 'debug', sink: (l) => logLines.push(l) });
     return {
       runId: randomUUID(), command: 'sync', dryRun, unsafeLog: false, ci: false, scheduledFor: undefined,
       startedAt: clock.now(), clock, log, db: createDb(client, log, dryRun), bootstrap: {} as RunContext['bootstrap'],
@@ -149,7 +150,7 @@ async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = 
     runSync(ctx(dryRun), { telegramApiBase: telegram.url, graphBase: graph.graphBase, loginBase: graph.loginBase });
   const ROOT = `/Apps/${graph.state.appName}`;
   const personalBefore = graph.snapshotOutsideRoot(ROOT);
-  return { files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
+  return { logLines, files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
@@ -256,6 +257,12 @@ describe('Phase 4 archive, end to end', () => {
     await h.sync();
     const outside = graphCalls(h).filter((r: Recorded) => {
       const p = decodeURIComponent(r.path.split('?')[0] ?? '');
+      // Folder create by parent id (D-54): the fake's own records must put the id inside the root.
+      const byId = /^\/v1\.0\/me\/drive\/items\/([^/:]+)\/children$/.exec(r.path.split('?')[0] ?? '');
+      if (byId !== null) {
+        const where = h.graph.pathOfId(decodeURIComponent(byId[1]!));
+        return !(r.method === 'POST' && where !== null && (where === h.ROOT || where.startsWith(`${h.ROOT}/`)));
+      }
       return !(p === '/v1.0/me/drive' || p.startsWith('/v1.0/me/drive/special/approot') || p.startsWith('/upload/'));
     });
     assert.deepEqual(outside.map((r) => `${r.method} ${r.path}`), []);
@@ -391,5 +398,80 @@ describe('Phase 4 archive: a lost app registration or an unreachable drive is ne
     h.clock.set('2026-09-19T13:00:00Z');
     await h.sync();
     assert.ok(ops(h).some((t) => /resolved|✅/i.test(t) && /reachable/.test(t)), `expected a resolution:\n${ops(h).join('\n---\n')}`);
+  });
+});
+
+describe('Phase 4 archive: every failure says why, and a run where everything fails pages at once', () => {
+  const failedLines = (h: H) => h.logLines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((l) => l['event'] === 'archive.failed' || l['msg'] === 'archive.failed');
+
+  it('logs one line per failure with step and status, and no names', async () => {
+    const h = await harness();
+    await h.sync();
+    h.files.push({ id: 3, name: 'Lab 03 Secret Name.pdf', size: 100, folder: 8 }, { id: 4, name: 'Lecture 04 Secret Name.pdf', size: 100, folder: 7 });
+    h.brokenStorage.add(3);
+    await h.sync();
+    const lines = failedLines(h);
+    assert.equal(lines.length, 1, h.logLines.filter((l) => l.includes('archive')).join('\n'));
+    assert.equal(lines[0]?.['step'], 'download');
+    assert.equal(lines[0]?.['code'], 'http_500');
+    assert.equal(lines[0]?.['status'], 500);
+    const all = h.logLines.join('\n');
+    assert.doesNotMatch(all, /Secret Name|Lab 03|AB1234|Practical Lab/, 'no file, module or folder names in the log');
+  });
+
+  it('pages in the same run when every attempt fails, naming the step and Graph code', async () => {
+    const h = await harness({ folderCreateBroken: true });
+    await h.sync();
+    for (let i = 1; i <= 3; i += 1) h.files.push({ id: 300 + i, name: `Lab 0${i}.pdf`, size: 100, folder: 8 });
+    await h.sync();
+    const lines = failedLines(h);
+    assert.equal(lines.length, 3);
+    assert.ok(lines.every((l) => l['step'] === 'folder' && l['status'] === 400 && l['graphCode'] === 'invalidRequest'));
+    const page = ops(h).filter((t) => t.includes('Every archive attempt this run failed'));
+    assert.equal(page.length, 1, ops(h).join('\n---\n'));
+    assert.match(page[0] ?? '', /3 of 3/);
+    assert.match(page[0] ?? '', /folder server 400 invalidRequest ×3/);
+    const summary = h.logLines.map((l) => JSON.parse(l) as Record<string, unknown>).findLast((l) => (l['event'] ?? l['msg']) === 'archive.summary');
+    assert.deepEqual(summary?.['failures'], { 'folder server 400 invalidRequest': 3 });
+
+    // Fixed: the next run archives, and the alert resolves.
+    h.graph.state.folderCreateBroken = false;
+    await h.sync();
+    assert.equal(h.graph.filesUnder(h.ROOT).length, 3);
+    assert.ok(ops(h).some((t) => /resolved|✅/i.test(t) && /archive attempt/i.test(t)), ops(h).join('\n---\n'));
+  });
+
+  it('does not page for a single failed attempt, or when anything in the run succeeded', async () => {
+    const h = await harness();
+    await h.sync();
+    h.files.push({ id: 3, name: 'Lab 03.pdf', size: 100, folder: 8 });
+    h.brokenStorage.add(3);
+    await h.sync();
+    h.files.push({ id: 4, name: 'Lab 04.pdf', size: 100, folder: 8 }, { id: 5, name: 'Lab 05.pdf', size: 100, folder: 8 });
+    h.brokenStorage.add(4);
+    await h.sync(); // 3 and 4 fail, 5 lands
+    assert.equal(ops(h).filter((t) => t.includes('Every archive attempt')).length, 0);
+  });
+
+  it('verifies what landed by OneDrive\'s own hash, and never calls a corrupted upload archived', async () => {
+    const h = await harness({ corruptNextUpload: true });
+    h.files.push({ id: 1, name: 'Lecture 06.pdf', size: 1000, folder: 7 });
+    await h.sync();
+    const row = await h.client.execute('SELECT download_state, share_url FROM files');
+    assert.equal(row.rows[0]?.['download_state'], 'failed');
+    assert.equal(row.rows[0]?.['share_url'], null);
+    const lines = failedLines(h);
+    assert.equal(lines[0]?.['step'], 'verify');
+    assert.equal(lines[0]?.['graphCode'], 'verifyMismatch');
+  });
+
+  it('does not adopt a different file that happens to have the same name and size', async () => {
+    const h = await harness();
+    h.files.push({ id: 2, name: 'Lab 04.pdf', size: 9_000, folder: 8 });
+    // Something of identical size, but different content, already sits at the name.
+    h.graph.plant(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`, Buffer.alloc(9_000, 7));
+    await h.sync();
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`), Buffer.alloc(9_000, 7), 'untouched');
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04 (uploaded 2026-09-18).pdf`), bytesFor(2, 9_000));
   });
 });

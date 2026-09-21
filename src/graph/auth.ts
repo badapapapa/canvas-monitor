@@ -36,11 +36,14 @@ export type GraphErrorCode =
 export class GraphError extends Error {
   readonly code: GraphErrorCode;
   readonly status: number | null;
-  constructor(code: GraphErrorCode, message: string, status: number | null = null) {
+  /** Graph's own error code (e.g. `invalidRequest`), only if it is a bare identifier: safe for public logs. */
+  readonly graphCode: string | null;
+  constructor(code: GraphErrorCode, message: string, status: number | null = null, graphCode: string | null = null) {
     super(scrubString(message));
     this.name = 'GraphError';
     this.code = code;
     this.status = status;
+    this.graphCode = graphCode !== null && /^[A-Za-z]{1,64}(\/[A-Za-z]{1,64})?$/.test(graphCode) ? graphCode : null;
   }
 }
 

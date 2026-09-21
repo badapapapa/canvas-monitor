@@ -12,6 +12,7 @@
  *   - a name clash under conflictBehavior=fail is reported at the final fragment.
  */
 
+import { quickXorHash } from '../../src/archive/quickxor.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -51,6 +52,10 @@ export interface FakeGraphState {
   appGone: 'deleted' | 'tenant_blocked' | null;
   /** Every drive call fails with an error the client has no category for. */
   driveBroken: boolean;
+  /** Folder creation answers 400 invalidRequest, as the first live run saw (D-54). */
+  folderCreateBroken: boolean;
+  /** The next completed upload stores different bytes from those sent. */
+  corruptNextUpload: boolean;
   throttleNext: number;
   failNextPuts: number;
   dropNextPut: boolean;
@@ -92,6 +97,8 @@ export class FakeGraph {
       refreshRevoked: false,
       appGone: null,
       driveBroken: false,
+      folderCreateBroken: false,
+      corruptNextUpload: false,
       throttleNext: 0,
       failNextPuts: 0,
       dropNextPut: false,
@@ -200,6 +207,22 @@ export class FakeGraph {
     return cur ?? null;
   }
 
+  /** The node with this id, anywhere in the drive, or null. */
+  nodeById(id: string, from: FNode = this.driveRoot): FNode | null {
+    if (from.id === id) return from;
+    for (const c of from.children.values()) {
+      const hit = this.nodeById(id, c);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+
+  /** The drive path of an item id, for tests checking where a request pointed. */
+  pathOfId(id: string): string | null {
+    const n = this.nodeById(id);
+    return n === null ? null : pathOf(n);
+  }
+
   private approot(): FNode {
     const apps = this.driveRoot.children.get('apps') ?? node('Apps', 'folder', this.driveRoot);
     return apps.children.get(this.state.appName.toLowerCase()) ?? node(this.state.appName, 'folder', apps);
@@ -219,7 +242,8 @@ export class FakeGraph {
       parentReference: { driveType: 'personal', path: pathOf(n.parent ?? n) },
       ...(n.kind === 'folder'
         ? { folder: { childCount: n.children.size } }
-        : { file: { hashes: { sha1Hash: createHash('sha1').update(n.bytes).digest('hex').toUpperCase() } } }),
+        // As real personal OneDrive: quickXorHash only, no SHA-1 (observed 2026-09-21, D-54).
+        : { file: { hashes: { quickXorHash: quickXorHash(n.bytes) } } }),
     };
   }
 
@@ -244,6 +268,18 @@ export class FakeGraph {
     }
 
     const graphPath = req.url?.slice('/v1.0'.length).split('?')[0] ?? '';
+
+    // Folder create by parent id: the only form real Graph accepts under the
+    // app folder (observed 2026-09-21, D-54).
+    const byId = /^\/me\/drive\/items\/([^/:]+)\/children$/.exec(graphPath);
+    if (byId !== null && method === 'POST') {
+      if (this.state.folderCreateBroken) return this.json(res, 400, { error: { code: 'invalidRequest', message: 'Invalid request' } });
+      const parent = this.nodeById(decodeURIComponent(byId[1]!));
+      if (parent === null || parent.kind !== 'folder') return this.json(res, 404, { error: { code: 'itemNotFound' } });
+      const b = JSON.parse(body.toString('utf8')) as { name: string };
+      if (parent.children.has(b.name.toLowerCase())) return this.json(res, 409, { error: { code: 'nameAlreadyExists' } });
+      return this.json(res, 201, this.item(node(b.name, 'folder', parent)));
+    }
     if (graphPath === '/me/drive') {
       if (this.state.quota === 'forbidden') return this.json(res, 403, { error: { code: 'accessDenied' } });
       const q = this.state.quota;
@@ -253,7 +289,6 @@ export class FakeGraph {
     const parsed = this.parseGraphPath(graphPath);
     if (parsed === null) return this.json(res, 400, { error: { code: 'invalidRequest', message: `fake cannot route ${graphPath}` } });
     const { base, segments, action } = parsed;
-    const conflictFail = url.searchParams.get('@microsoft.graph.conflictBehavior') === 'fail';
 
     let target: FNode | null = base;
     for (const s of action === null ? segments : segments.slice(0, action === 'createUploadSession' ? -1 : undefined)) {
@@ -262,6 +297,11 @@ export class FakeGraph {
 
     if (method === 'GET' && action === null) {
       return target === null ? this.json(res, 404, { error: { code: 'itemNotFound' } }) : this.json(res, 200, this.item(target));
+    }
+    if (method === 'POST' && action === 'children' && graphPath.startsWith('/me/drive/special/approot')) {
+      // Real Graph, 2026-09-21: 400 for /special/approot/children and for
+      // /special/approot:/<path>:/children alike (D-54).
+      return this.json(res, 400, { error: { code: 'invalidRequest', message: 'Invalid request' } });
     }
     if (method === 'POST' && action === 'children') {
       if (target === null) return this.json(res, 404, { error: { code: 'itemNotFound' } });
@@ -274,9 +314,10 @@ export class FakeGraph {
     if (method === 'POST' && action === 'createUploadSession') {
       if (target === null) return this.json(res, 404, { error: { code: 'itemNotFound', message: 'parent missing' } });
       const b = JSON.parse(body.toString('utf8')) as { item: { name: string; fileSize?: number; '@microsoft.graph.conflictBehavior'?: string } };
+      // Real personal OneDrive, 2026-09-21: `fileSize` is a 400, whatever the docs say (D-54).
+      if (b.item.fileSize !== undefined) return this.json(res, 400, { error: { code: 'invalidRequest', message: 'Invalid request' } });
       const id = randomUUID();
       this.sessions.set(id, { parent: target, name: b.item.name, total: b.item.fileSize ?? -1, received: [], next: 0, gone: false });
-      void conflictFail;
       return this.json(res, 200, { uploadUrl: `${this.url}/upload/${id}`, expirationDateTime: new Date(Date.now() + 3600_000).toISOString() });
     }
     return this.json(res, 405, { error: { code: 'notAllowed', message: `${method} ${graphPath}` } });
@@ -388,7 +429,12 @@ export class FakeGraph {
     if (session.parent.children.has(session.name.toLowerCase())) {
       return this.json(res, 409, { error: { code: 'nameAlreadyExists', message: 'Another file exists with the same name as the uploaded session.' } });
     }
-    const created = node(session.name, 'file', session.parent, Buffer.concat(session.received));
+    const bytes = Buffer.concat(session.received);
+    if (this.state.corruptNextUpload) {
+      this.state.corruptNextUpload = false;
+      bytes[0] = bytes[0]! ^ 0xff;
+    }
+    const created = node(session.name, 'file', session.parent, bytes);
     this.sessions.delete(path.slice('/upload/'.length));
     return this.json(res, 201, this.item(created));
   }
