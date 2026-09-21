@@ -172,6 +172,20 @@ const MUTATIONS: Mutation[] = [
     to: "headers['authorization'] = `Bearer ${options.token}`;",
     tests: [ARCHIVE],
   },
+  {
+    name: 'report a deleted app or blocked directory as a generic server error (D-53: silent)',
+    file: 'src/graph/auth.ts',
+    from: "if (aadsts === 'AADSTS700016' || aadsts === 'AADSTS5000225') return 'app';\n  if (code === 'invalid_client' || code === 'unauthorized_client') return 'app';",
+    to: '',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'stop the archive silently when the drive check fails for an unclassified reason',
+    file: 'src/archive/stage.ts',
+    from: "return stop.stopped === null ? { ...out, stopped: 'unreachable', stopDetail: messageOf(error) } : { ...out, ...stop };",
+    to: 'return { ...out, ...stop };',
+    tests: [ARCHIVE],
+  },
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));

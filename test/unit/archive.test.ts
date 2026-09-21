@@ -361,3 +361,35 @@ describe('Phase 4 archive: the NUS token goes to the Canvas origin and nowhere e
     assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Lectures/Lecture 06.pdf`), bytesFor(1, 1000), 'and the download still works');
   });
 });
+
+describe('Phase 4 archive: a lost app registration or an unreachable drive is never silent (D-53)', () => {
+  for (const gone of ['deleted', 'tenant_blocked'] as const) {
+    it(`[${gone}] pages once, says sign-in will not fix it, and still announces files`, async () => {
+      const h = await harness({ appGone: gone });
+      await h.sync();
+      h.files.push({ id: 5, name: 'Lab 05.pdf', size: 1000, folder: 8 });
+      await h.sync();
+      assert.match(content(h).join('\n'), /Lab 05\.pdf/);
+      const pages = ops(h).filter((t) => t.includes('app registration is missing'));
+      assert.equal(pages.length, 1);
+      assert.match(pages[0] ?? '', gone === 'deleted' ? /AADSTS700016/ : /AADSTS5000225/);
+      assert.match(pages[0] ?? '', /Signing in again will not fix this/);
+      assert.equal(ops(h).filter((t) => t.includes('OneDrive access has expired')).length, 0, 'not misreported as an expired sign-in');
+    });
+  }
+
+  it('alerts when OneDrive has been unreachable for a day, not on the first bad run, and resolves', async () => {
+    const h = await harness({ driveBroken: true });
+    await h.sync();
+    h.clock.set('2026-09-18T20:00:00Z');
+    await h.sync();
+    assert.equal(ops(h).filter((t) => t.includes('not been reachable')).length, 0, 'eight hours: not yet');
+    h.clock.set('2026-09-19T12:30:00Z');
+    await h.sync();
+    assert.equal(ops(h).filter((t) => t.includes('OneDrive has not been reachable for 24 hours')).length, 1);
+    h.graph.state.driveBroken = false;
+    h.clock.set('2026-09-19T13:00:00Z');
+    await h.sync();
+    assert.ok(ops(h).some((t) => /resolved|✅/i.test(t) && /reachable/.test(t)), `expected a resolution:\n${ops(h).join('\n---\n')}`);
+  });
+});

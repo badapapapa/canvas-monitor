@@ -37,7 +37,7 @@ export const PATH_BUDGET = 200;
 const MAX_ATTEMPTS = 5;
 const MAX_ALTERNATES = 5;
 
-export type ArchiveStop = 'graph_auth' | 'provisioning' | 'quota_full' | 'not_personal' | 'budget';
+export type ArchiveStop = 'graph_auth' | 'graph_app' | 'provisioning' | 'quota_full' | 'not_personal' | 'unreachable' | 'budget';
 
 export interface ArchiveOutcome {
   archived: Array<{ itemId: string; bytes: number }>;
@@ -144,7 +144,10 @@ export async function runArchive(deps: {
       }
       out.quota = await deps.drive.quota();
     } catch (error) {
-      return { ...out, ...stopFor(error) };
+      // Never a silent stop: an unclassified failure is 'unreachable', which
+      // the sync turns into an alert once it has lasted a day.
+      const stop = stopFor(error);
+      return stop.stopped === null ? { ...out, stopped: 'unreachable', stopDetail: messageOf(error) } : { ...out, ...stop };
     }
   }
 
@@ -307,6 +310,7 @@ function sameHash(remote: string | undefined, local: string): boolean {
 function stopFor(error: unknown): { stopped: ArchiveStop | null; stopDetail: string | null } {
   if (!(error instanceof GraphError)) return { stopped: null, stopDetail: null };
   if (error.code === 'auth') return { stopped: 'graph_auth', stopDetail: error.message };
+  if (error.code === 'app') return { stopped: 'graph_app', stopDetail: error.message };
   if (error.code === 'provisioning') return { stopped: 'provisioning', stopDetail: error.message };
   if (error.code === 'quota') return { stopped: 'quota_full', stopDetail: error.message };
   return { stopped: null, stopDetail: null };

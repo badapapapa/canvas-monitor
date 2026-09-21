@@ -47,6 +47,10 @@ export interface FakeGraphState {
   /** Newly consented AppFolder-only apps, 2026: every drive call refused. */
   provisioningBroken: boolean;
   refreshRevoked: boolean;
+  /** The token endpoint's answer once the app registration or its directory is gone. */
+  appGone: 'deleted' | 'tenant_blocked' | null;
+  /** Every drive call fails with an error the client has no category for. */
+  driveBroken: boolean;
   throttleNext: number;
   failNextPuts: number;
   dropNextPut: boolean;
@@ -86,6 +90,8 @@ export class FakeGraph {
       quota: { total: 1024 ** 4, used: 123 * 1024 ** 3 },
       provisioningBroken: false,
       refreshRevoked: false,
+      appGone: null,
+      driveBroken: false,
       throttleNext: 0,
       failNextPuts: 0,
       dropNextPut: false,
@@ -232,6 +238,7 @@ export class FakeGraph {
       this.state.throttleNext -= 1;
       return this.json(res, 429, { error: { code: 'activityLimitReached' } }, { 'retry-after': '0' });
     }
+    if (this.state.driveBroken) return this.json(res, 400, { error: { code: 'invalidRequest', message: 'unexpected' } });
     if (this.state.provisioningBroken) {
       return this.json(res, 403, { error: { code: 'accessDenied', message: 'Database Is Read Only', innerError: { code: 'serviceReadOnly' } } });
     }
@@ -317,6 +324,15 @@ export class FakeGraph {
     }
     if (grant === 'refresh_token') {
       const presented = form.get('refresh_token') ?? '';
+      if (this.state.appGone === 'deleted') {
+        return this.json(res, 400, {
+          error: 'unauthorized_client',
+          error_description: "AADSTS700016: Application with identifier 'x' was not found in the directory 'Microsoft Accounts'.",
+        });
+      }
+      if (this.state.appGone === 'tenant_blocked') {
+        return this.json(res, 400, { error: 'invalid_request', error_description: 'AADSTS5000225: This tenant has been blocked due to inactivity.' });
+      }
       if (this.state.refreshRevoked || !this.validRefresh.has(presented)) return this.json(res, 400, { error: 'invalid_grant' });
       // Documented: the new token replaces the old, but the old is NOT revoked.
       return this.json(res, 200, this.issue());

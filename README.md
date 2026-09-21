@@ -192,6 +192,12 @@ In this order — each step is safe to stop after.
 
 Revoke the app at any time at account.live.com/consent/Manage.
 
+**Keep the directory alive.** The app registration lives in the Entra directory
+created with your Azure subscription. A directory with no billing activity for
+about 200 days can be blocked and then deleted (DECISIONS.md D-53). When Azure
+for Students ends, accept the pay-as-you-go offer rather than letting it lapse.
+If it happens anyway, the `graph_app` alert says so.
+
 ## Privacy posture
 
 This repository is public, which makes its GitHub Actions logs public with it.

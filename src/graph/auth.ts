@@ -22,6 +22,7 @@ import { LOGIN_BASE, type RequestGuard } from './guard.ts';
 
 export type GraphErrorCode =
   | 'auth' // refresh token dead or consent revoked: sign in again
+  | 'app' // the app registration is gone, or its directory is blocked (D-53): signing in will not help
   | 'provisioning' // the 2026 AppFolder regression: 403 serviceReadOnly / 503 pending provisioning
   | 'forbidden'
   | 'not_found'
@@ -108,8 +109,11 @@ export class TokenProvider {
 
     if (!response.ok || typeof json.access_token !== 'string') {
       const code = json.error ?? `http_${response.status}`;
-      const dead = code === 'invalid_grant' || code === 'interaction_required' || code === 'consent_required';
-      throw new GraphError(dead ? 'auth' : 'server', `token refresh rejected: ${code}`, response.status);
+      // Only the AADSTS number is kept from the description: it is enough to
+      // diagnose, and the rest can echo identifiers back.
+      const aadsts = /AADSTS\d+/.exec(json.error_description ?? '')?.[0];
+      const detail = aadsts === undefined ? code : `${code} ${aadsts}`;
+      throw new GraphError(classifyTokenError(code, aadsts), `token refresh rejected: ${detail}`, response.status);
     }
 
     // Persist first. If this throws, the new access token is never used and
@@ -184,4 +188,16 @@ export async function deviceCodeLogin(options: DeviceLoginOptions): Promise<{ re
     throw new GraphError('auth', `sign-in did not complete: ${json.error ?? response.status}`, response.status);
   }
   throw new GraphError('auth', 'sign-in timed out before the code was entered');
+}
+
+/**
+ * AADSTS700016: application not found in the directory. AADSTS5000225: the
+ * directory is blocked for inactivity (deleted 20 days later). Either way the
+ * app registration itself is unusable, and `graph-login` cannot fix it.
+ */
+export function classifyTokenError(code: string, aadsts: string | undefined): GraphErrorCode {
+  if (aadsts === 'AADSTS700016' || aadsts === 'AADSTS5000225') return 'app';
+  if (code === 'invalid_client' || code === 'unauthorized_client') return 'app';
+  if (code === 'invalid_grant' || code === 'interaction_required' || code === 'consent_required') return 'auth';
+  return 'server';
 }

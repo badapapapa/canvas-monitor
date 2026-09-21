@@ -1547,3 +1547,59 @@ blocks the app and the workaround fails. The choice is made at sign-in
 
 **Phase 6 note:** the 2026-09-18 file was a real answer-sheet upload, and a
 "Suggested Solutions" file is now live evidence for `tune-patterns`.
+
+---
+
+## D-53 — The app registration outlives its subscription, but not an inactive directory · assessed 2026-09-21
+
+Question: does the app registration keep working after the Azure subscription
+that created its directory lapses (a free trial ends; Azure for Students ends at
+graduation)?
+
+**From Microsoft's docs (checked 2026-09-21):**
+- App registrations live in the Entra **directory (tenant)**, not in a
+  subscription. *Add an existing Azure subscription to your tenant* (updated
+  2026-06-19): "When a subscription expires, the trusted instance remains, but
+  the security principals lose access to Azure resources." Subscription expiry
+  alone does not remove the registration, and this app uses no Azure resources.
+- **But directories get deleted for inactivity.** *Troubleshoot inaccessible
+  tenants* (updated 2026-04-09): an inactive tenant fails sign-in with
+  `AADSTS5000225`, can be reactivated through Microsoft support for 20 days,
+  and is then deleted and unrecoverable. The page does not define
+  "inactive". Microsoft's warning email and a Microsoft answer on Q&A (5511341,
+  2025) put it as **200 days without commercial activity past the billing
+  cycle**, and the email tells you to "make a purchase" to keep the tenant.
+  That is billing activity, not sign-ins. Nothing documents that an app's
+  token traffic counts.
+- *Microsoft Entra ID Free* (updated 2026-04-01): the free Entra subscription
+  "remains active as long as your billing account is active". Whether that
+  alone counts as activity is not documented.
+- *Azure for Students*: no card; renewable yearly "as long as you're a
+  student". When credit or the year runs out, you are offered pay-as-you-go,
+  and if you decline, "your subscription and products will be disabled".
+
+**Consequence:** Azure for Students works now and survives its own expiry, but
+roughly 200 days after the last student subscription ends, the directory is at
+risk of being blocked, then deleted with the app registration inside it.
+**The durable option is to accept Microsoft's pay-as-you-go offer when the
+student subscription ends** (it keeps the same directory; a subscription with
+no resources costs nothing, but needs a card). That keeps a billing
+relationship alive, which is what the documented trigger measures.
+
+**Built so it cannot fail silently:**
+- `AADSTS700016` (app not found), `AADSTS5000225` (directory blocked),
+  `invalid_client` and `unauthorized_client` are classified as `app`, not as
+  an expired sign-in. They raise a `graph_app` critical alert that says
+  signing in will not help and names the 20-day window.
+- Previously, any unclassified failure during the drive check ended the
+  archive stage with **no stop reason and no alert**, every run. It is now
+  `unreachable`, and pages as `graph_unreachable` once it has lasted 24
+  hours (`archive_drive_ok_at`), then resolves when the drive answers again.
+- Notification never depends on any of this: files are still announced,
+  without a OneDrive link.
+- Two mutation-check entries cover both paths.
+
+**If the directory is lost anyway:** register a new app (README, Going live,
+Phase 4) and run `graph-login`. Files already archived stay in OneDrive; a new
+AppFolder app gets its own `Apps/` folder, so new files start in a new tree
+(not verified in practice).

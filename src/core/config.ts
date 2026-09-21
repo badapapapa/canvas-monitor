@@ -109,6 +109,12 @@ export const CONFIG_SPEC = {
     pattern: /^[^"*:<>?/\\|]{1,60}$/,
     formatHint: 'a single folder name, no slashes',
   },
+  archive_drive_ok_at: {
+    secret: false,
+    description: 'Written by sync: when the archive last reached OneDrive. Drives the graph_unreachable alert.',
+    pattern: /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/,
+    formatHint: 'ISO-8601 UTC timestamp',
+  },
   archive_enabled: {
     secret: false,
     description: 'Download and archive files to OneDrive during sync. Off until graph-login has succeeded.',

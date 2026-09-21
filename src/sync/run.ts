@@ -197,6 +197,34 @@ function buildDrive(ctx: RunContext, config: Config, options: SyncOptions): Grap
   });
 }
 
+const DRIVE_BLOCKING: ReadonlySet<string> = new Set(['graph_auth', 'graph_app', 'provisioning', 'unreachable']);
+
+/**
+ * An unclassified failure to reach OneDrive (5xx, network, an unknown error
+ * code) pages only once it has lasted STALE_AFTER_MS, like a stale course: one
+ * bad run is noise, a day of them is an outage nobody else would notice.
+ */
+async function driveReachability(ctx: RunContext, config: Config, a: ArchiveOutcome, now: Date): Promise<AlertCondition[]> {
+  const last = config.get('archive_drive_ok_at');
+  if (a.stopped === null || !DRIVE_BLOCKING.has(a.stopped)) {
+    await setConfig(ctx.db, ctx.clock, 'archive_drive_ok_at', now.toISOString());
+    return [];
+  }
+  if (last === undefined || last === '') {
+    // Never reached yet: start the clock at the first failure.
+    await setConfig(ctx.db, ctx.clock, 'archive_drive_ok_at', now.toISOString());
+    return [];
+  }
+  const age = now.getTime() - new Date(last).getTime();
+  if (a.stopped !== 'unreachable' || age <= STALE_AFTER_MS) return [];
+  return [{
+    key: 'graph_unreachable',
+    severity: 'warn',
+    summary: `OneDrive has not been reachable for ${Math.floor(age / 3600_000)} hours. Files are not being archived.`,
+    detail: a.stopDetail ?? '',
+  }];
+}
+
 /** Operational alerts the archive stage can raise. The `storage@` family is a ladder. */
 function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
   const out: AlertCondition[] = [];
@@ -206,6 +234,17 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
       severity: 'critical',
       summary: 'OneDrive access has expired or been revoked. Files are not being archived.',
       detail: 'Sign in again: npm run graph-login',
+    });
+  }
+  if (a.stopped === 'graph_app') {
+    out.push({
+      key: 'graph_app',
+      severity: 'critical',
+      summary: 'The OneDrive app registration is missing, or its directory has been blocked for inactivity. Files are not being archived.',
+      detail:
+        `${a.stopDetail ?? ''}. Signing in again will not fix this (DECISIONS.md D-53). Check entra.microsoft.com: ` +
+        'a directory blocked for inactivity (AADSTS5000225) can be reactivated through Microsoft support only within ' +
+        '20 days; after that, register a new app (README, Going live, Phase 4) and run npm run graph-login.',
     });
   }
   if (a.stopped === 'provisioning') {
@@ -403,7 +442,8 @@ async function syncBody(
     outcome.archive = await runArchive({ ctx, canvas, canvasToken: config.require('canvas_token'), drive, config });
     if (!ctx.dryRun) {
       alerts.push(...archiveAlerts(outcome.archive));
-      evaluatedPrefixes.push('graph_auth', 'graph_provisioning', 'onedrive_not_personal', 'archive_exhausted');
+      alerts.push(...(await driveReachability(ctx, config, outcome.archive, now)));
+      evaluatedPrefixes.push('graph_auth', 'graph_app', 'graph_unreachable', 'graph_provisioning', 'onedrive_not_personal', 'archive_exhausted');
       // Storage is judged only when this run actually reached the drive.
       if (outcome.archive.quota !== null || outcome.archive.stopped === 'quota_full') evaluatedPrefixes.push('storage@');
     }
