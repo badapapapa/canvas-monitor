@@ -1764,3 +1764,13 @@ gate stays at 50MB for now (decision pending, see the Phase 5 plan).
   between `s` and `_`.
 - One module's `Weekly Learning Materials/Week NN/...` layout routed
   perfectly, 32 of 32.
+
+**Noted for later phases (from the live archive):**
+- *Phase 6.* The real answer-file conventions are `-Answers` (e.g.
+  `<code>-T1-Answers.zip`), `Suggested Solutions`, and `Questions with
+  answers`. One module currently has tutorials 3–5 with no answers yet: a
+  live test case for the follow-up tracker.
+- *Phase 7.* Canvas adds its own `-1`, `-2` suffixes when a lecturer uploads
+  a file with the same name again (`<name>-1.pptx`, `<name>-2.pdf`). These
+  are likely revisions, and the live archive has examples, sometimes with
+  byte-identical sizes: test data for versioning.
