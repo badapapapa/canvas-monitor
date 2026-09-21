@@ -74,7 +74,7 @@ function archiveLine(o: SyncOutcome): string | null {
     a.skipped > 0 ? `${a.skipped} skipped` : null,
     a.failed > 0 ? `${a.failed} failed` : null,
     a.stopped !== null && a.stopped !== 'budget' ? `stopped: ${a.stopped}` : null,
-    a.stopped === 'budget' ? 'more next run' : null,
+    a.stopped === 'budget' ? `more next run (budget: ${(a.stopDetail ?? '').split(' ')[0]})` : null,
   ].filter((b) => b !== null);
   return bits.length === 0 ? null : `OneDrive: ${bits.join(', ')}`;
 }

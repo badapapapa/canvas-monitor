@@ -37,6 +37,8 @@ import { route, type Category } from './route.ts';
 /** Leaves room for C:\Users\<name>\OneDrive\Apps\<app>\ under Windows' 260. */
 export const PATH_BUDGET = 200;
 const MAX_ATTEMPTS = 5;
+/** Per-run wall-clock budget for archiving, checked between files. */
+export const ARCHIVE_TIME_BUDGET_MS = 240_000;
 const MAX_ALTERNATES = 5;
 
 export type ArchiveStop = 'graph_auth' | 'graph_app' | 'provisioning' | 'quota_full' | 'not_personal' | 'unreachable' | 'budget';
@@ -145,7 +147,10 @@ export async function runArchive(deps: {
   const maxFileBytes = config.getNumber('archive_max_file_bytes', 50 * 1024 * 1024);
   const maxFiles = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_files_per_run', 40);
   const maxBytes = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : config.getNumber('archive_max_bytes_per_run', 400 * 1024 * 1024);
-  const maxMs = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : 240_000;
+  // Time is the cap that binds in practice (D-55): ~7 s per file, serially,
+  // so about 30-35 files per run. It leaves the 10-minute job timeout room for
+  // detection before and the flush after.
+  const maxMs = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : ARCHIVE_TIME_BUDGET_MS;
   const out: ArchiveOutcome = { archived: [], adopted: 0, skipped: 0, failed: 0, planned: 0, stopped: null, stopDetail: null, quota: null, exhausted: 0, failures: [] };
 
   // Check the drive before touching any file: this is where a dead refresh
@@ -208,8 +213,12 @@ export async function runArchive(deps: {
       out.planned += 1;
       continue;
     }
-    if (filesThisRun >= maxFiles || bytesThisRun >= maxBytes || ctx.clock.now().getTime() - started > maxMs) {
+    const elapsed = ctx.clock.now().getTime() - started;
+    const cap = filesThisRun >= maxFiles ? 'files' : bytesThisRun >= maxBytes ? 'bytes' : elapsed > maxMs ? 'time' : null;
+    if (cap !== null) {
       out.stopped = 'budget';
+      out.stopDetail = `${cap} (files ${filesThisRun}/${maxFiles === Number.MAX_SAFE_INTEGER ? '-' : maxFiles}, ` +
+        `${(bytesThisRun / 1048576).toFixed(1)} MB, ${Math.round(elapsed / 1000)} s of ${maxMs / 1000} s)`;
       break;
     }
 
@@ -335,7 +344,7 @@ export async function runArchive(deps: {
   out.exhausted = Number(gaveUp.rows[0]?.['n'] ?? 0);
   log.info('archive.summary', {
     archived: out.archived.length, adopted: out.adopted, skipped: out.skipped, failed: out.failed,
-    planned: out.planned, stopped: out.stopped, exhausted: out.exhausted,
+    planned: out.planned, stopped: out.stopped, budget: out.stopped === 'budget' ? out.stopDetail : null, exhausted: out.exhausted,
     failures: tallyFailures(out.failures),
   });
   return out;

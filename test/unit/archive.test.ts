@@ -276,6 +276,7 @@ describe('Phase 4 archive, end to end', () => {
     const first = await h.sync();
     assert.equal(first.archive?.archived.length, 4);
     assert.equal(first.archive?.stopped, 'budget');
+    assert.match(first.archive?.stopDetail ?? '', /^files \(files 4\/4, /, 'names the cap that bound');
     const second = await h.sync();
     assert.equal(second.archive?.archived.length, 2);
     assert.equal(h.graph.filesUnder(h.ROOT).length, 6);

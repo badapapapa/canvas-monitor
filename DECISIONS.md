@@ -1686,9 +1686,81 @@ observed today, not the documented behaviour.
 
 **Observed, not yet acted on:** creating an upload session on personal
 OneDrive puts a 0-byte placeholder at the path at once (an experiment left
-`2610/session-probe.bin`). After a crash mid-upload, the retry therefore meets
-a 0-byte item at the name. The hash check refuses to adopt it, and the file
-goes to the dated alternate name. That is safe but untidy. Whether the
-placeholder disappears when the session expires is still to be checked.
+`2610/session-probe.bin`). *(Corrected 2026-09-21, below.)*
+
+**Correction, 2026-09-21 (re-verified through the guard, no bypass).** A
+reader checking the synced folder found no `session-probe.bin`, and read
+this entry as wrong. It was partly wrong:
+- **Right:** the placeholder is real. It is a 0-byte item with the empty
+  `quickXorHash`, created 08:38:06Z, returned by `GET` on its path like any
+  file, with the same fields as a real archived file.
+- **Wrong:** "a placeholder you will see". It exists **server-side only**:
+  the macOS OneDrive client does not sync it (82 files on disk, no probe).
+- **Unknown, previously implied to be short-lived:** it had not cleaned itself
+  up after 4 h 10 m, and at 12:48Z it still blocked its name (a `fail`
+  session request on it returned 409 `nameAlreadyExists`). How long it
+  lasts is not known. Measuring it means creating another invisible
+  placeholder, so it was not done without asking.
+- **Consequence, confirmed:** after a crash mid-upload, a retry within that
+  window meets the placeholder. The hash check refuses to adopt it (0 bytes),
+  and the file lands under the dated alternate name. The canonical name is
+  then held by an item that no synced folder shows. Safe, and untidy.
+  Resuming the original session instead would need its `uploadUrl`, a
+  pre-authenticated credential, stored until the retry. That is not built.
 
 Mutation-check entries 22–29 cover each fix.
+
+---
+
+## D-55 — The archive is live: results, decisions, and what the runs showed · 2026-09-21
+
+**Result.** Three runs archived 33, 23 and 26 files, the last reporting "The
+archive is up to date". Checked independently: 82 files in the synced folder,
+and in the database 82 `complete` plus 3 `skipped_size` — 85, every file Canvas
+has. Zero failures, nothing pending. The file uploaded during the D-54
+reproduction was **adopted by hash**, not uploaded again. Three different
+files sharing one generic name in one folder got dated names, so
+never-overwrite held.
+
+**Decisions:**
+1. **AppFolder stays** (D-51). The archive is referenced where it is,
+   `Apps/Canvas Archive/<term>/<module>`, not moved into personal folders.
+   This also keeps the single-writer rule simple.
+2. **No prior-term backfill.** The prior-term course's material is not needed.
+   D-36's backfill command stays in the code but will not be run. **Do not
+   raise it again.**
+3. **Bypassing the guard against the real drive needs asking first.** D-54's
+   diagnosis made about a dozen direct requests. AppFolder contained them
+   (the reason it was chosen), but from now on every request to the real drive
+   goes through `RequestGuard`, unless the owner agrees to a specific bypass
+   beforehand. Diagnostic output must never print `uploadUrl` or
+   `@microsoft.graph.downloadUrl`: both carry pre-authenticated tokens, and
+   D-54's diagnosis printed each once, locally.
+
+**The run budget is time.** Every capped run stopped on the 240 s wall-clock
+budget, not on files (40) or bytes (400MB): first run 33 files / 51.6MB,
+archive timestamps spanning 236 s; second 23 / 93.8MB in about 240 s. The cost
+is ~7 s per file, serially: re-fetching the Canvas file object, four download
+hops, a path lookup, creating the session, the PUT, and the verify GET. The
+budget leaves the 10-minute job timeout room for detection before and the
+flush after. `stopDetail` and `archive.summary` now name the cap that bound,
+e.g. `time (files 33/40, 51.6 MB, 241 s of 240 s)`.
+
+**Size gate.** The three skipped files are software installers (347MB, 130MB,
+128MB), not course material, and freely downloadable. Raising
+`archive_max_file_bytes` does **not** re-queue them: `skipped_size` is a
+terminal state, and the candidate query takes only new, `pending`, or
+`failed` rows with attempts left. A reset (to `pending`) would be needed.
+Two limits apply to anything much larger than 50MB. The file is held in
+memory. And the time budget is checked between files, so one 347MB upload
+could run the job well past its budget, towards its 10-minute timeout. The
+gate stays at 50MB for now (decision pending, see the Phase 5 plan).
+
+**Canvas structure seen in the live data** (input to Phase 5):
+- One module keeps every file in Canvas's default `unfiled` folder, and has
+  **no Canvas modules** at all: filenames are the only signal.
+- One module keeps tutorials and datasets together in `Tutorials_Labs`. The
+  underscore defeats the word-boundary rule, because `\b` does not fall
+  between `s` and `_`.
+- One module's `Weekly Learning Materials/Week NN/...` layout routed
+  perfectly, 32 of 32.
