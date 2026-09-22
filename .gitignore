@@ -26,3 +26,7 @@ probe-*.log
 discover-*.txt
 discover-*.log
 courses.seed.json
+
+# The mirror's mapping (DECISIONS.md D-58): real term and module folder names.
+# The committed mirror.config.example.json shows the shape with invented values.
+mirror.config.json

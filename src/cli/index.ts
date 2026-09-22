@@ -29,6 +29,7 @@ import { runSyncCommand } from './sync.ts';
 import { runTelegramTest } from './telegram-test.ts';
 import { runGraphLogin } from './graph-login.ts';
 import { runReroute, runRules } from './reroute.ts';
+import { runMirrorCli } from './mirror.ts';
 import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
@@ -49,6 +50,7 @@ Commands:
   rules [list|add|remove]  Per-module routing rules, stored in the database (D-57).
                            add --module <code> --field folder|module|filename|extension
                                --pattern <regex|ext,list> --target <folder> [--priority N]
+  mirror [--baseline]      Local only: copy NEW archive files into my own folders (D-58).
   reroute --preview        Show where each _unsorted file would move. Moves nothing.
   reroute --apply <fp>     Move exactly the previewed plan, once per file (D-40, D-57).
   set-config <key>         Set a config value, read from stdin (never argv).
@@ -94,6 +96,8 @@ async function main(argv: string[]): Promise<number> {
         pattern: { type: 'string' },
         target: { type: 'string' },
         priority: { type: 'string' },
+        baseline: { type: 'boolean', default: false },
+        config: { type: 'string' },
         help: { type: 'boolean', short: 'h', default: false },
       },
     });
@@ -138,6 +142,8 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'migrate':
       return await withoutRunRecord('migrate', dryRun);
+    case 'mirror':
+      return await runMirrorCli({ dryRun, baseline: values.baseline === true, config: values.config });
     case 'rules':
       return await withRun('rules', dryRun, unsafeLog, async (ctx) =>
         runRules(ctx, { action: positionals[1], rest: positionals.slice(2), opts: { module: values.module, field: values.field, pattern: values.pattern, target: values.target, priority: values.priority } }));

@@ -1864,3 +1864,59 @@ through `diagnostic()`):
   `_unsorted/probe-b.txt`, `Tutorials/probe-a.txt` (moved there) and
   `Tutorials/probe-b.txt`. Every upload session completed, so there are no
   placeholders.
+
+---
+
+## D-58 — The local one-way mirror · built 2026-09-22; baseline and schedule await approval
+
+The archive stays where it is (D-55). A local program copies files archived
+**after a baseline** into my own module folders, under a `Downloaded from
+Canvas` subfolder. It runs on the Mac, not in Actions, and is configured by
+the gitignored `mirror.config.json` (shape: `mirror.config.example.json`).
+
+**Rules, as enforced:**
+1. **Baseline first.** A real run with no state is refused. `--baseline`
+   records every archived file as seen and copies nothing. It will not
+   re-baseline over existing state.
+2. **Identity is the archive's own file id** (`files.id`, derived from the
+   Canvas file id), never a path. A baselined file that Phase 5 re-routes is
+   still baselined.
+3. **One-way.** The archive is only read (`MirrorGuard.readable`), and so is
+   the archive database, which does not even get a run row.
+4. **Never delete, never overwrite.** Copies are staged in `var/mirror/tmp`
+   (outside OneDrive), verified against the archive's SHA-256, then created
+   with exclusive-create. A taken name gets ` (2)`, ` (3)`... An identical
+   file already there is recorded, not duplicated.
+5. **Writes only inside `<dest>/<term>/<module>/Downloaded from Canvas/`**
+   for a mapped term and module (`MirrorGuard.writable`). Paths are resolved
+   through symlinks. The archive is refused. A destination overlapping the
+   archive is refused at start-up.
+6. The archive's folder structure is kept, custom folders included.
+7. `.DS_Store` is never copied or written.
+8. **A copy the mirror made follows its file when the archive re-routes it,
+   only if it is byte-identical** to what the mirror wrote. A copy I have
+   changed, moved or deleted is left exactly as it is, and the log says why.
+
+**OneDrive specifics.** An online-only source file is downloaded on demand
+when read. A read that stalls (offline) or yields bytes that do not match the
+archive yet (still syncing) is **deferred** to the next run, never copied
+half-way. State is saved after every copy, atomically, in
+`var/mirror/state.json`. The log is `var/mirror/mirror.log`.
+
+**Schedule (not installed).** `node scripts/mirror-schedule.ts` prints a
+LaunchAgent: every 20 minutes (`StartInterval` 1200) and at login
+(`RunAtLoad`). `--install` loads it; `--uninstall` removes it. launchd-started
+processes reading `~/Library/CloudStorage` are reported to fail with `EPERM`
+until the binary has access. The reports are community ones, not Apple
+documentation. Such a grant is tied to the binary's real path, which
+Homebrew changes on upgrade. So the plist runs node by its real, versioned
+path, and the mirror names that path in its `EPERM` error.
+
+**First dry-run against the real folders (2026-09-22):** 82 of 82 archived
+files would be baselined, 0 to copy. Nothing written: no state, no
+subfolders.
+
+Tests: 14, including a guard test over twelve escape attempts (the module
+folder, look-alike folders, `..`, symlinks into the archive and back out,
+`.DS_Store`) and byte-identical snapshots of everything outside the allowed
+folders. Four mutation-check entries (39–42).

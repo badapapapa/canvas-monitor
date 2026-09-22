@@ -198,6 +198,23 @@ about 200 days can be blocked and then deleted (DECISIONS.md D-53). When Azure
 for Students ends, accept the pay-as-you-go offer rather than letting it lapse.
 If it happens anyway, the `graph_app` alert says so.
 
+## The local mirror (optional, Mac only)
+
+Copies files archived **from now on** into your own module folders, under
+`Downloaded from Canvas/` (DECISIONS.md D-58). One-way; never deletes or
+overwrites; writes nowhere else.
+
+1. `cp mirror.config.example.json mirror.config.json` and fill in the mapping
+   (gitignored: it names real folders).
+2. `npm run mirror -- --dry-run`: previews the baseline.
+3. `npm run mirror -- --baseline`: records everything currently archived as
+   seen. Copies nothing.
+4. `npm run mirror -- --dry-run` again, any time, shows what the next run would do.
+5. Schedule: `node scripts/mirror-schedule.ts` prints the LaunchAgent;
+   `--install` loads it. If the log shows `EPERM`, grant the node binary it
+   names Full Disk Access (System Settings → Privacy & Security), and again
+   after `brew upgrade node`.
+
 ## Privacy posture
 
 This repository is public, which makes its GitHub Actions logs public with it.

@@ -32,6 +32,7 @@ const SYNC = 'test/unit/sync.test.ts';
 const PURE = 'test/unit/archive-pure.test.ts';
 const GRAPH = 'test/unit/graph.test.ts';
 const ARCHIVE = 'test/unit/archive.test.ts';
+const MIRROR = 'test/unit/mirror.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -307,6 +308,35 @@ const MUTATIONS: Mutation[] = [
     from: "return value.normalize('NFC').replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();",
     to: "return value.normalize('NFC');",
     tests: [PURE],
+  },
+  // --- D-58: the local mirror ----------------------------------------------
+  {
+    name: 'mirror guard approves any path (writes outside "Downloaded from Canvas")',
+    file: 'src/mirror/guard.ts',
+    from: '      if (inside(real, subtree)) return lexical;',
+    to: '      return lexical;',
+    tests: [MIRROR],
+  },
+  {
+    name: 'mirror identifies files by path, so a re-routed baselined file looks new',
+    file: 'src/mirror/mirror.ts',
+    from: '    if (state.entries[f.id] !== undefined) continue;',
+    to: '    if (Object.values(state.entries).some((e) => e.archivePath === f.targetPath)) continue;',
+    tests: [MIRROR],
+  },
+  {
+    name: 'mirror overwrites a file already at the destination name',
+    file: 'src/mirror/mirror.ts',
+    from: 'await copyFile(staged, dest, fsConstants.COPYFILE_EXCL); // fails rather than overwrite',
+    to: 'await copyFile(staged, path.join(subtree, ...segs.slice(2)));',
+    tests: [MIRROR],
+  },
+  {
+    name: 'mirror moves a copy I have changed when the archive re-routes it',
+    file: 'src/mirror/mirror.ts',
+    from: '    if (sha256Of(from) !== entry.copiedSha256) {',
+    to: '    if (false) {',
+    tests: [MIRROR],
   },
 ];
 
