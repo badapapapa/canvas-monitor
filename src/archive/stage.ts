@@ -32,7 +32,8 @@ import type { FileFacts } from '../ingest/normalise.ts';
 import { downloadCanvasFile } from './download.ts';
 import { quickXorHash } from './quickxor.ts';
 import { alternateName, fitPath, safeSegment } from './filename.ts';
-import { route, type Category } from './route.ts';
+import { route } from './route.ts';
+import { loadRules } from './rules.ts';
 
 /** Leaves room for C:\Users\<name>\OneDrive\Apps\<app>\ under Windows' 260. */
 export const PATH_BUDGET = 200;
@@ -171,6 +172,7 @@ export async function runArchive(deps: {
     }
   }
 
+  const rules = await loadRules(ctx.db);
   const candidates = await loadCandidates(ctx, deps.contextIds ?? null, deps.unlimited === true ? 100_000 : Math.max(maxFiles * 3, 50));
   let bytesThisRun = 0;
   let filesThisRun = 0;
@@ -184,7 +186,7 @@ export async function runArchive(deps: {
     let state = c.row?.state ?? null;
 
     if (c.row === null) {
-      const decision = route({ contextType: c.contextType, folder: c.folder, module: c.module, fileName: c.title ?? '' });
+      const decision = route({ contextType: c.contextType, folder: c.folder, module: c.module, fileName: c.title ?? '' }, rules.get(c.contextId) ?? []);
       const dirs = [safeSegment(c.term), safeSegment(c.moduleCode), decision.category];
       const segments = fitPath(dirs, safeSegment(c.title ?? `file ${c.canvasFileId}`), PATH_BUDGET);
       const size = c.facts.size ?? 0;
@@ -289,7 +291,7 @@ export async function runArchive(deps: {
 
       for (let n = 0; result === null && n <= MAX_ALTERNATES; n += 1) {
         if (n > 0) {
-          const name = alternateName(segments[segments.length - 1] ?? 'file', sgtDate(c.postedAt), n);
+          const name = alternateName(segments[segments.length - 1] ?? 'file', sgtDate(c.postedAt), n, c.folder);
           finalSegments = fitPath(dirs, safeSegment(name), PATH_BUDGET);
           // Reserve the new name before uploading under it.
           await ctx.db.write.execute('reserve alternate name', {
@@ -328,7 +330,7 @@ export async function runArchive(deps: {
                ctx.clock.now().toISOString(), ctx.clock.now().toISOString(), c.itemId],
       });
       out.archived.push({ itemId: c.itemId, bytes: download.bytes.length });
-      log.info('archive.complete', { item: c.itemId, bytes: download.bytes.length, category: segments[2] as Category });
+      log.info('archive.complete', { item: c.itemId, bytes: download.bytes.length, category: segments[2] });
     } catch (error) {
       const stop = stopFor(error);
       await fail(failureOf(step, error), messageOf(error));

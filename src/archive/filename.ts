@@ -64,10 +64,19 @@ export function collisionKey(name: string): string {
  * The archive name used when the plain name is taken: the Canvas upload date,
  * then a counter (SPEC.md section 9). Never overwrite; add alongside.
  */
-export function alternateName(name: string, uploadedSgtDate: string, attempt: number): string {
+export function alternateName(name: string, uploadedSgtDate: string, attempt: number, canvasFolder: string | null = null): string {
   const { stem, ext } = splitExtension(name);
-  const tag = attempt <= 1 ? `uploaded ${uploadedSgtDate}` : `uploaded ${uploadedSgtDate} ${attempt}`;
+  // A week from the Canvas folder says more than a date (D-57): "src (Week 03).zip".
+  const week = weekOf(canvasFolder);
+  const base = week === null ? `uploaded ${uploadedSgtDate}` : `Week ${week}`;
+  const tag = attempt <= 1 ? base : week === null ? `${base} ${attempt}` : `${base}, ${attempt}`;
   return `${stem} (${tag})${ext}`;
+}
+
+/** "Weekly Learning Materials/Week 3/Lecture Notes" -> "03"; null if no week. */
+export function weekOf(canvasFolder: string | null): string | null {
+  const m = canvasFolder === null ? null : /\bweek\s*0*(\d{1,2})\b/i.exec(canvasFolder);
+  return m === null ? null : m[1]!.padStart(2, '0');
 }
 
 /**

@@ -28,11 +28,12 @@ import { runSeedCourses } from './seed-courses.ts';
 import { runSyncCommand } from './sync.ts';
 import { runTelegramTest } from './telegram-test.ts';
 import { runGraphLogin } from './graph-login.ts';
+import { runReroute, runRules } from './reroute.ts';
 import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
 const USAGE = `
-canvas-monitor -- Phase 0
+canvas-monitor
 
 Usage: node src/cli/index.ts <command> [options]
 
@@ -45,6 +46,11 @@ Commands:
   telegram-test            Send a test message to both Telegram chats.
   graph-login              Connect OneDrive (device code sign-in, personal accounts only).
   backfill-course <id>     Archive one course's files once, without polling it (D-36).
+  rules [list|add|remove]  Per-module routing rules, stored in the database (D-57).
+                           add --module <code> --field folder|module|filename|extension
+                               --pattern <regex|ext,list> --target <folder> [--priority N]
+  reroute --preview        Show where each _unsorted file would move. Moves nothing.
+  reroute --apply <fp>     Move exactly the previewed plan, once per file (D-40, D-57).
   set-config <key>         Set a config value, read from stdin (never argv).
   config-list              Show config keys and whether they are set.
   prune-raw                Delete raw captures past their retention window.
@@ -81,6 +87,13 @@ async function main(argv: string[]): Promise<number> {
         overwrite: { type: 'boolean', default: false },
         'unsafe-log': { type: 'boolean', default: false },
         replay: { type: 'boolean', default: false },
+        preview: { type: 'boolean', default: false },
+        apply: { type: 'string' },
+        module: { type: 'string' },
+        field: { type: 'string' },
+        pattern: { type: 'string' },
+        target: { type: 'string' },
+        priority: { type: 'string' },
         help: { type: 'boolean', short: 'h', default: false },
       },
     });
@@ -125,6 +138,11 @@ async function main(argv: string[]): Promise<number> {
   switch (command) {
     case 'migrate':
       return await withoutRunRecord('migrate', dryRun);
+    case 'rules':
+      return await withRun('rules', dryRun, unsafeLog, async (ctx) =>
+        runRules(ctx, { action: positionals[1], rest: positionals.slice(2), opts: { module: values.module, field: values.field, pattern: values.pattern, target: values.target, priority: values.priority } }));
+    case 'reroute':
+      return await withRun('reroute', dryRun, unsafeLog, async (ctx) => runReroute(ctx, { preview: values.preview === true, apply: values.apply }));
     case 'probe':
       return await withRun('probe', dryRun, unsafeLog, async (ctx) => {
         const outcome = await runProbe(ctx, { json: values.json === true });

@@ -14,6 +14,9 @@
  *                                                ONLY under an id this guard has seen Graph
  *                                                return for a folder inside the root (D-54)
  *          POST <root>:/<safe path>:/createUploadSession   conflictBehavior=fail
+ *          PATCH /me/drive/items/{id}  {parentReference:{id}} ONLY: the re-route move
+ *                                      (D-57), and only as narrow as described at
+ *                                      `checkMove()` below
  *          POST /me/drive/root/children          folder mode only: create the root folder itself
  *   Upload PUT|GET <an uploadUrl Graph returned in this process>, WITHOUT Authorization
  *   Login  POST /consumers/oauth2/v2.0/{token,devicecode}
@@ -74,6 +77,12 @@ export interface GuardOptions {
 const CONFLICT_PARAM = '@microsoft.graph.conflictBehavior';
 /** The only id-addressed shape allowed: creating a child folder (D-54). */
 const ID_CHILDREN = /^\/me\/drive\/items\/([^/:]+)\/children$/;
+/** The re-route move (D-57): an item by id, PATCHed with a new parent only. */
+const ID_ITEM = /^\/me\/drive\/items\/([^/:]+)$/;
+
+function pathKey(segments: readonly string[]): string {
+  return segments.map((s) => s.normalize('NFC').toLowerCase()).join('/');
+}
 
 export function rootPrefix(root: RootSpec): string {
   return root.mode === 'appfolder' ? '/me/drive/special/approot' : `/me/drive/root:/${encodeURIComponent(root.name)}`;
@@ -111,8 +120,14 @@ export class RequestGuard {
   private readonly graphBase: string;
   private readonly loginBase: string;
   private readonly uploadUrls = new Set<string>();
-  /** Folder ids Graph returned for requests this guard approved as inside the root. */
-  private readonly rootedFolderIds = new Set<string>();
+  /** Folder id -> its path under the root, learned only from approved requests' responses. */
+  private readonly rootedFolderIds = new Map<string, string[]>();
+  /** File id -> path, for files learned at exactly <term>/<module>/_unsorted/<name>. */
+  private readonly movableFiles = new Map<string, string[]>();
+  /** Paths (lower-cased) Graph answered 404 for, since nothing here wrote to them. */
+  private readonly confirmedAbsent = new Set<string>();
+  /** Folder names a re-route may move into: standard categories plus stored-rule targets. */
+  private readonly moveDestinations = new Set<string>();
 
   constructor(options: GuardOptions) {
     this.root = options.root;
@@ -129,22 +144,60 @@ export class RequestGuard {
   }
 
   /**
-   * Learn a folder id from a successful response. The request is re-checked
-   * here, so only a response to an approved, root-confined request can teach
-   * the guard anything: a rooted GET, or a folder create under a known id.
+   * Which folder names a re-route may move files into (D-57). Each must be a
+   * safe single segment and not `_unsorted`. Nothing is allowed until set.
+   */
+  allowMoveDestinations(names: Iterable<string>): void {
+    for (const name of names) {
+      if (name === '_unsorted' || safeSegment(name) !== name) throw new GuardError(`"${name}" cannot be a move destination`);
+      this.moveDestinations.add(name);
+    }
+  }
+
+  /**
+   * Learn from a response. The request is re-checked here, so only a response
+   * to an approved, root-confined request can teach the guard anything:
+   *   - a rooted GET that found a folder: its id and path;
+   *   - a rooted GET that found a file at <term>/<module>/_unsorted/<name>:
+   *     its id, as movable once;
+   *   - a rooted GET answered 404: that path is confirmed absent;
+   *   - a folder create under a known folder id: the new folder's id and path.
    */
   observe(req: GuardedRequest, status: number, response: unknown): void {
-    if (status < 200 || status > 299 || response === null || typeof response !== 'object') return;
-    const item = response as { id?: unknown; folder?: unknown };
-    if (typeof item.id !== 'string' || item.id === '' || item.folder === undefined || item.folder === null) return;
-    this.check(req);
     const method = req.method.toUpperCase();
+    if (method !== 'GET' && method !== 'POST') return;
     const path = req.url.slice(this.graphBase.length).split('?')[0] ?? '';
     const prefix = rootPrefix(this.root);
     const rootedGet = method === 'GET' && (path === prefix || path.startsWith(`${prefix}:`) || path.startsWith(`${prefix}/`));
-    const childCreate = method === 'POST' && ID_CHILDREN.test(path);
-    const folderRoot = method === 'POST' && this.root.mode === 'folder' && path === '/me/drive/root/children';
-    if (rootedGet || childCreate || folderRoot) this.rootedFolderIds.add(item.id);
+
+    if (status === 404 && rootedGet) {
+      this.check(req);
+      const { segments, action } = this.parseRooted(path.slice(prefix.length));
+      if (action === null && segments.length > 0) this.confirmedAbsent.add(pathKey(segments));
+      return;
+    }
+    if (status < 200 || status > 299 || response === null || typeof response !== 'object') return;
+    const item = response as { id?: unknown; folder?: unknown; file?: unknown };
+    if (typeof item.id !== 'string' || item.id === '') return;
+    const isFolder = item.folder !== undefined && item.folder !== null;
+    this.check(req);
+
+    if (rootedGet) {
+      const { segments, action } = this.parseRooted(path.slice(prefix.length));
+      if (action !== null) return;
+      if (isFolder) this.rootedFolderIds.set(item.id, segments);
+      else if (item.file !== undefined && segments.length === 4 && segments[2] === '_unsorted') this.movableFiles.set(item.id, segments);
+      return;
+    }
+    if (!isFolder) return;
+    const child = ID_CHILDREN.exec(path);
+    if (method === 'POST' && child !== null) {
+      const parent = this.rootedFolderIds.get(decodeURIComponent(child[1]!));
+      const name = parseJson(req.body)['name'];
+      if (parent !== undefined && typeof name === 'string') this.rootedFolderIds.set(item.id, [...parent, name]);
+      return;
+    }
+    if (method === 'POST' && this.root.mode === 'folder' && path === '/me/drive/root/children') this.rootedFolderIds.set(item.id, []);
   }
 
   check(req: GuardedRequest): void {
@@ -181,6 +234,11 @@ export class RequestGuard {
     const path = req.url.slice(this.graphBase.length).split('?')[0] ?? '';
     const query = [...url.searchParams.entries()];
 
+    const moving = ID_ITEM.exec(path);
+    if (method === 'PATCH' && moving !== null) {
+      this.checkMove(moving[1]!, req, query);
+      return;
+    }
     if (method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
       throw new GuardError(`${method} to Graph (this app never overwrites, moves or deletes)`);
     }
@@ -197,7 +255,10 @@ export class RequestGuard {
       if (!this.rootedFolderIds.has(id)) throw new GuardError('addressing by an item id not known to be a folder inside the root');
       if (method !== 'POST') throw new GuardError(`${method} on an item id`);
       if (query.length > 0) throw new GuardError('query parameters on a folder create');
-      this.requireFolderCreate(parseJson(req.body));
+      const body = parseJson(req.body);
+      this.requireFolderCreate(body);
+      // Writing here un-confirms any absence recorded for that path.
+      this.confirmedAbsent.delete(pathKey([...this.rootedFolderIds.get(id)!, String(body['name'])]));
       return;
     }
     if (/\/items\//.test(path) || /\/items$/.test(path)) throw new GuardError('addressing by item id');
@@ -247,6 +308,57 @@ export class RequestGuard {
     if (props[CONFLICT_PARAM] !== 'fail') throw new GuardError('an upload session without conflictBehavior=fail');
     if (props['name'] !== segments[segments.length - 1]) throw new GuardError('an upload session whose item name disagrees with its path');
     if ('deferCommit' in body || '@microsoft.graph.sourceUrl' in props) throw new GuardError('an upload session with deferCommit or sourceUrl');
+    this.confirmedAbsent.delete(pathKey(segments));
+  }
+
+  /**
+   * The re-route move (D-57), exactly this narrow:
+   *   - PATCH /me/drive/items/{id} with a body of `{parentReference:{id}}` and
+   *     nothing else: no rename, no other property, no query;
+   *   - the item was learned by this guard as a file at exactly
+   *     <term>/<module>/_unsorted/<name>, and each learning allows one move;
+   *   - the destination folder was learned by this guard, is a direct child of
+   *     the SAME <term>/<module>/, is not `_unsorted`, is a safe segment, and
+   *     is an allowed destination (a standard category or a stored rule's
+   *     target);
+   *   - <destination>/<name> was confirmed absent by a 404 from Graph, with no
+   *     write to it since.
+   * The move keeps the file's name, so the checked path is the one it lands at.
+   */
+  private checkMove(rawId: string, req: GuardedRequest, query: Array<[string, string]>): void {
+    let id: string;
+    try {
+      id = decodeURIComponent(rawId);
+    } catch {
+      throw new GuardError('a malformed item id');
+    }
+    if (encodeURIComponent(id) !== rawId) throw new GuardError('a non-canonical item id');
+    if (query.length > 0) throw new GuardError('query parameters on a move');
+    const body = parseJson(req.body);
+    const ref = body['parentReference'];
+    if (Object.keys(body).join() !== 'parentReference' || ref === null || typeof ref !== 'object' || Array.isArray(ref)) {
+      throw new GuardError('a PATCH that does anything but set parentReference (no rename, no other property)');
+    }
+    const refKeys = Object.keys(ref as Record<string, unknown>);
+    const parentId = (ref as Record<string, unknown>)['id'];
+    if (refKeys.join() !== 'id' || typeof parentId !== 'string') throw new GuardError('a parentReference other than {id}');
+
+    const source = this.movableFiles.get(id);
+    if (source === undefined) throw new GuardError('moving an item not learned as a file in <term>/<module>/_unsorted/');
+    const dest = this.rootedFolderIds.get(parentId);
+    if (dest === undefined) throw new GuardError('moving into a folder not learned inside the root');
+    if (dest.length !== 3 || dest[0] !== source[0] || dest[1] !== source[1]) {
+      throw new GuardError('a move destination that is not a direct child of the same <term>/<module>/');
+    }
+    const folder = dest[2]!;
+    if (folder === '_unsorted' || safeSegment(folder) !== folder) throw new GuardError(`move destination "${folder}"`);
+    if (!this.moveDestinations.has(folder)) throw new GuardError(`move destination "${folder}" is not a standard category or a stored rule's target`);
+    const landing = pathKey([...dest, source[3]!]);
+    if (!this.confirmedAbsent.has(landing)) throw new GuardError('a move whose destination name was not confirmed absent');
+
+    // One move per learning; the landing path is no longer known to be absent.
+    this.movableFiles.delete(id);
+    this.confirmedAbsent.delete(landing);
   }
 
   private requireFolderCreate(body: Record<string, unknown>): void {

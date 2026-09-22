@@ -104,6 +104,17 @@ const TOKEN_RE = /\b\d{3,6}~[A-Za-z0-9]{20,}\b/g;
  * one place the token actually appears -- a fetch error quoting the URL.
  */
 const TELEGRAM_TOKEN_RE = /\d{5,15}:[A-Za-z0-9_-]{30,}/g;
+/**
+ * Pre-authenticated OneDrive URLs (DECISIONS.md D-56). Whoever holds one can
+ * read or write that item with no other credential. Personal OneDrive puts the
+ * credential in a `tempauth` query value; the documented form puts it in the
+ * path of an `*.up.1drv.com/up/...` upload URL. Both are removed ALWAYS,
+ * including under --unsafe-log: there is no debugging reason to see them.
+ */
+const TEMPAUTH_RE = /(tempauth=)[^&\s"'<>]+/gi;
+const UPLOAD_PATH_RE = /https:\/\/[^\s"'<>/]*\.up\.1drv\.com\/up\/[^\s"'<>]+/gi;
+/** Keys whose value is a pre-authenticated URL, whatever it looks like. */
+const CREDENTIAL_URL_KEYS = new Set(['uploadurl', 'downloadurl', '@microsoft.graph.downloadurl', '@content.downloadurl']);
 
 export interface RedactOptions {
   /** Keep free-text bodies. Only ever true under --unsafe-log, never in CI. */
@@ -116,6 +127,8 @@ export interface RedactOptions {
 
 export function scrubString(input: string): string {
   return input
+    .replace(TEMPAUTH_RE, '$1[redacted]')
+    .replace(UPLOAD_PATH_RE, '[upload-url]')
     .replace(TOKEN_RE, '[token]')
     .replace(TELEGRAM_TOKEN_RE, '[token]')
     .replace(EMAIL_RE, '[email]')
@@ -145,6 +158,11 @@ function walk(value: unknown, options: RedactOptions, depth: number): unknown {
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       const lower = key.toLowerCase();
 
+      // First, and not subject to any option: credential URLs never print.
+      if (CREDENTIAL_URL_KEYS.has(lower)) {
+        out[key] = entry === null || entry === undefined ? entry : '[credential-url]';
+        continue;
+      }
       if (PII_KEYS.has(lower)) {
         out[key] = '[redacted]';
         continue;
@@ -174,4 +192,13 @@ function shrinkPerson(entry: unknown): unknown {
   if (typeof entry !== 'object' || Array.isArray(entry)) return '[redacted]';
   const id = (entry as Record<string, unknown>)['id'];
   return id === undefined ? '[redacted]' : { id };
+}
+
+/**
+ * The one way diagnostic scripts print Graph or Canvas data (D-56). Names are
+ * kept -- diagnostics run locally, for me -- but credentials never are:
+ * pre-authenticated URLs, tempauth values and tokens are always removed.
+ */
+export function diagnostic(value: unknown): string {
+  return JSON.stringify(redact(value, { keepBodies: true, keepIdentity: true }), null, 1);
 }

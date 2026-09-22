@@ -1774,3 +1774,83 @@ gate stays at 50MB for now (decision pending, see the Phase 5 plan).
   a file with the same name again (`<name>-1.pptx`, `<name>-2.pdf`). These
   are likely revisions, and the live archive has examples, sometimes with
   byte-identical sizes: test data for versioning.
+
+---
+
+## D-56 — Pre-authenticated URLs are removed in code, not by habit · applied 2026-09-22
+
+D-54's diagnosis printed a pre-authenticated OneDrive URL twice, once an
+`uploadUrl` and once a `@microsoft.graph.downloadUrl`. A memory rule is a
+habit, not a guarantee, so it is now enforced in `src/core/redact.ts`, the
+code every log line and `GraphError` message already passes through:
+- by key: `uploadUrl`, `downloadUrl`, `@microsoft.graph.downloadUrl` and
+  `@content.downloadUrl` become `[credential-url]` at any depth;
+- by value: any `tempauth=` value becomes `tempauth=[redacted]`, and the
+  documented `*.up.1drv.com/up/...` form becomes `[upload-url]`, in any
+  string (e.g. an error message quoting a URL);
+- **unconditionally**: `--unsafe-log`, which lifts name and body redaction
+  for local debugging, does not lift this;
+- `diagnostic(value)`: the one printer for diagnostic scripts. It keeps
+  names, because it runs locally for me, and never keeps credentials.
+  Diagnostic scripts in this repository print only through it.
+
+Tests cover each path (key, value, unsafe mode, logger, `diagnostic()`,
+`GraphError`); two mutation-check entries.
+
+---
+
+## D-57 — Phase 5 as built: rules as data, previewed re-routes, a narrow move · 2026-09-22
+
+**Routing.**
+- Every value is matched with runs of non-alphanumerics collapsed to one
+  space, so `Tutorials_Practicals` reads as two words.
+- The field decides before the rule: folder, then module, then filename.
+- "Tutorial" in a filename now routes to Tutorials (confidence 0.6).
+- **Per-module rules live in the database (`routing_rules`), never in the
+  repository**, because they name real folders and files (D-39). They are
+  managed with `npm run rules`. A rule may target a standard category or a
+  **custom folder** directly under `<term>/<module>/`, validated as a safe
+  single segment that is not `_unsorted`, `Group` or `_`-prefixed. Stored
+  rules are tried first, by priority. A bad row is skipped, never applied.
+- New files are routed by stored rules as soon as the rule exists.
+  Already-placed files never move (route-once).
+
+**Collision names (future files only).** A name clash now takes the week from
+the Canvas folder, `src (Week 03).zip`, and falls back to the upload date when
+the folder names no week. Nothing already placed is renamed.
+
+**Re-routes only after an approved preview (D-40).**
+- `npm run reroute -- --preview` lists every re-routable `_unsorted` file the
+  current rules would move, and where, plus those that stay. It makes no
+  Graph request. It prints a fingerprint of the moves and the exact rules
+  behind them.
+- `--apply <fingerprint>` re-plans and refuses unless the fingerprint
+  matches, so any change to rules or data since the preview needs a new
+  preview.
+- A moved file stops being re-routable, which is the once-only rule.
+- The file keeps its OneDrive item id, so a move recorded late (after a
+  crash) is recognised and just written down.
+- A taken destination name fails that one file and leaves both files
+  untouched.
+- Both commands refuse to run under CI, because they print real names.
+
+**The move exception (the guard, D-50), exactly this narrow:**
+`PATCH /me/drive/items/{id}` with a body of `{parentReference:{id}}` and
+nothing else: no rename, no query. It is allowed only when:
+- the item was learned by the guard, from Graph's answer to an approved GET,
+  as a *file* at exactly `<term>/<module>/_unsorted/<name>`. Each learning
+  allows one move;
+- the destination folder was learned the same way and is a **direct child of
+  the same `<term>/<module>/`**. It is not `_unsorted`, it is a safe segment,
+  and it is a standard category or a stored rule's target;
+- `<destination>/<name>` was **confirmed absent by a 404 from Graph**, with no
+  write to that path since.
+
+The drive never retries a move. Tests cover each constraint, including one
+where everything else is made to pass so that only the destination rule can
+refuse. Seven mutation-check entries (32–38).
+
+**Unverified until the live test:** Microsoft's move documentation says
+nothing about a name clash (no `conflictBehavior` for moves). The design
+never relies on it, because it confirms the name absent first. The fake
+assumes a 409.

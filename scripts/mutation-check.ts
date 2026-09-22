@@ -204,8 +204,8 @@ const MUTATIONS: Mutation[] = [
   {
     name: 'let the guard learn a folder id from any response (an id can name anything)',
     file: 'src/graph/guard.ts',
-    from: 'if (rootedGet || childCreate || folderRoot) this.rootedFolderIds.add(item.id);',
-    to: 'this.rootedFolderIds.add(item.id);',
+    from: "if (method === 'POST' && this.root.mode === 'folder' && path === '/me/drive/root/children') this.rootedFolderIds.set(item.id, []);",
+    to: 'this.rootedFolderIds.set(item.id, []);',
     tests: [PURE],
   },
   {
@@ -242,6 +242,71 @@ const MUTATIONS: Mutation[] = [
     from: 'out[WIDTH / 8 - 8 + b]! ^= Number(length & 0xffn);',
     to: 'void out;',
     tests: ['test/unit/quickxor.test.ts'],
+  },
+  // --- D-56: pre-authenticated URLs never print ----------------------------
+  {
+    name: 'print a pre-authenticated URL held under uploadUrl / downloadUrl',
+    file: 'src/core/redact.ts',
+    from: 'if (CREDENTIAL_URL_KEYS.has(lower)) {',
+    to: 'if (false) {',
+    tests: ['test/unit/redact.test.ts'],
+  },
+  {
+    name: 'print a tempauth credential quoted in free text (an error message)',
+    file: 'src/core/redact.ts',
+    from: ".replace(TEMPAUTH_RE, '$1[redacted]')",
+    to: '',
+    tests: ['test/unit/redact.test.ts'],
+  },
+  // --- D-57: the re-route move, and nothing wider --------------------------
+  {
+    name: 'move into another module (destination not in the same <term>/<module>/)',
+    file: 'src/graph/guard.ts',
+    from: 'if (dest.length !== 3 || dest[0] !== source[0] || dest[1] !== source[1]) {',
+    to: 'if (dest.length !== 3) {',
+    tests: [PURE],
+  },
+  {
+    name: 'move deeper or shallower than a direct child of <term>/<module>/',
+    file: 'src/graph/guard.ts',
+    from: 'if (dest.length !== 3 || dest[0] !== source[0] || dest[1] !== source[1]) {',
+    to: 'if (dest[0] !== source[0] || dest[1] !== source[1]) {',
+    tests: [PURE],
+  },
+  {
+    name: "move into a custom folder no stored rule named",
+    file: 'src/graph/guard.ts',
+    from: "if (!this.moveDestinations.has(folder)) throw new GuardError(`move destination \"${folder}\" is not a standard category or a stored rule's target`);",
+    to: '',
+    tests: [PURE],
+  },
+  {
+    name: 'move without Graph having confirmed the landing name absent',
+    file: 'src/graph/guard.ts',
+    from: "if (!this.confirmedAbsent.has(landing)) throw new GuardError('a move whose destination name was not confirmed absent');",
+    to: '',
+    tests: [PURE],
+  },
+  {
+    name: 'allow a learned file to be moved more than once',
+    file: 'src/graph/guard.ts',
+    from: '    this.movableFiles.delete(id);\n',
+    to: '',
+    tests: [PURE],
+  },
+  {
+    name: 'apply a re-route plan other than the one approved in the preview',
+    file: 'src/archive/reroute.ts',
+    from: 'if (plan.fingerprint !== approvedFingerprint) {',
+    to: 'if (false) {',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'match rules on raw names, so Tutorials_Labs routes nowhere',
+    file: 'src/archive/route.ts',
+    from: "return value.normalize('NFC').replace(/[^\\p{L}\\p{N}]+/gu, ' ').trim();",
+    to: "return value.normalize('NFC');",
+    tests: [PURE],
   },
 ];
 

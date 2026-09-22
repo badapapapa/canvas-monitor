@@ -269,6 +269,23 @@ export class FakeGraph {
 
     const graphPath = req.url?.slice('/v1.0'.length).split('?')[0] ?? '';
 
+    // Move (D-57): PATCH an item's parentReference. The item keeps its id.
+    // ASSUMPTION until the live test: a name clash at the destination is a 409.
+    const moveOf = /^\/me\/drive\/items\/([^/:]+)$/.exec(graphPath);
+    if (moveOf !== null && method === 'PATCH') {
+      const moved = this.nodeById(decodeURIComponent(moveOf[1]!));
+      const b = JSON.parse(body.toString('utf8')) as { parentReference?: { id?: string }; name?: string };
+      const dest = b.parentReference?.id === undefined ? null : this.nodeById(b.parentReference.id);
+      if (moved === null || dest === null || dest.kind !== 'folder') return this.json(res, 404, { error: { code: 'itemNotFound' } });
+      const name = b.name ?? moved.name;
+      if (dest.children.has(name.toLowerCase())) return this.json(res, 409, { error: { code: 'nameAlreadyExists' } });
+      moved.parent?.children.delete(moved.name.toLowerCase());
+      moved.parent = dest;
+      moved.name = name;
+      dest.children.set(name.toLowerCase(), moved);
+      return this.json(res, 200, this.item(moved));
+    }
+
     // Folder create by parent id: the only form real Graph accepts under the
     // app folder (observed 2026-09-21, D-54).
     const byId = /^\/me\/drive\/items\/([^/:]+)\/children$/.exec(graphPath);

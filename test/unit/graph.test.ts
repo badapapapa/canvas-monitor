@@ -3,7 +3,7 @@ import { after, describe, it } from 'node:test';
 import { randomBytes } from 'node:crypto';
 import { deviceCodeLogin, GraphError, TokenProvider } from '../../src/graph/auth.ts';
 import { GraphDrive } from '../../src/graph/drive.ts';
-import { RequestGuard, SCOPES, type RootSpec } from '../../src/graph/guard.ts';
+import { GuardError, RequestGuard, SCOPES, type RootSpec } from '../../src/graph/guard.ts';
 import { silentLogger } from '../../src/core/log.ts';
 import { systemClock } from '../../src/core/clock.ts';
 import { FakeGraph, type Recorded } from '../helpers/fake-graph.ts';
@@ -190,7 +190,7 @@ function insideRoot(r: Recorded, root: RootSpec, fake: FakeGraph, rootPath: stri
     if (r.hasAuth) return `bearer token sent to an upload URL: ${path}`;
     return r.method === 'PUT' || r.method === 'GET' ? null : `${r.method} on an upload URL`;
   }
-  if (!['GET', 'POST'].includes(r.method)) return `${r.method} ${path}`;
+  if (!['GET', 'POST', 'PATCH'].includes(r.method)) return `${r.method} ${path}`;
   if (path === '/v1.0/me/drive') return r.method === 'GET' ? null : `${r.method} /me/drive`;
   // Folder create by parent id (D-54): allowed only if the FAKE's own records
   // put that id at or under the root -- independent of what the guard believed.
@@ -199,6 +199,14 @@ function insideRoot(r: Recorded, root: RootSpec, fake: FakeGraph, rootPath: stri
     const where = fake.pathOfId(byId[1]!);
     if (r.method !== 'POST') return `${r.method} by id`;
     return where !== null && (where === rootPath || where.startsWith(`${rootPath}/`)) ? null : `id outside root: ${where}`;
+  }
+  // The re-route move (D-57): the item and its new parent must both be inside
+  // the root by the fake's own records -- independent of the guard.
+  const moved = /^\/v1\.0\/me\/drive\/items\/([^/:]+)$/.exec(path);
+  if (moved !== null && r.method === 'PATCH') {
+    const inside = (p: string | null) => p !== null && (p === rootPath || p.startsWith(`${rootPath}/`));
+    const parentId = (JSON.parse(r.body) as { parentReference?: { id?: string } }).parentReference?.id ?? '';
+    return inside(fake.pathOfId(moved[1]!)) && inside(fake.pathOfId(parentId)) ? null : `move outside root: ${path}`;
   }
   if (/\/items(\/|$)/.test(path)) return `id addressing: ${path}`;
   if (path.split(/[/:]/).includes('..')) return `traversal: ${path}`;
@@ -223,6 +231,10 @@ describe('confinement: every request stays inside the root, and personal files a
       await drive.upload(['2610', 'AB1234', 'Lectures', 'L02.pdf'], Buffer.from('new')).catch(() => undefined);
       await drive.itemAt(['2610', 'AB1234', 'Lectures', 'L01.pdf']);
       await drive.itemAt(['2610', 'does not exist.pdf']);
+      drive.allowMoveDestinations(['Tutorials']);
+      await drive.ensureFolders(['2610', 'AB1234', '_unsorted']);
+      await drive.upload(['2610', 'AB1234', '_unsorted', 'T1.pdf'], Buffer.from('tutorial'));
+      await drive.move(['2610', 'AB1234', '_unsorted', 'T1.pdf'], ['2610', 'AB1234', 'Tutorials']);
 
       const violations = fake.requests.map((r) => insideRoot(r, root, fake, rootPath)).filter((v): v is string => v !== null);
       assert.deepEqual(violations, [], `requests outside the root:\n${violations.join('\n')}`);
@@ -230,4 +242,41 @@ describe('confinement: every request stays inside the root, and personal files a
       assert.ok(fake.requests.length > 10, 'the flows actually ran');
     });
   }
+});
+
+describe('the re-route move (D-57)', () => {
+  it('moves an _unsorted file into a sibling folder, keeping its id and bytes', async () => {
+    const { drive, fake, rootPath } = await setup(APP);
+    drive.allowMoveDestinations(['Harbour Case Study']);
+    await drive.ensureFolders(['2610', 'AB1234', '_unsorted']);
+    const uploaded = await drive.upload(['2610', 'AB1234', '_unsorted', 'case.pdf'], Buffer.from('case study'));
+    const moved = await drive.move(['2610', 'AB1234', '_unsorted', 'case.pdf'], ['2610', 'AB1234', 'Harbour Case Study']);
+    assert.equal(moved.id, uploaded.id);
+    assert.deepEqual(fake.fileBytes(`${rootPath}/2610/AB1234/Harbour Case Study/case.pdf`), Buffer.from('case study'));
+    assert.deepEqual(fake.filesUnder(`${rootPath}/2610/AB1234/_unsorted`), []);
+  });
+
+  it('refuses a taken destination name and leaves both files exactly as they were', async () => {
+    const { drive, fake, rootPath } = await setup(APP);
+    drive.allowMoveDestinations(['Tutorials']);
+    await drive.ensureFolders(['2610', 'AB1234', '_unsorted']);
+    await drive.upload(['2610', 'AB1234', '_unsorted', 'T1.pdf'], Buffer.from('new'));
+    fake.plant(`${rootPath}/2610/AB1234/Tutorials/T1.pdf`, Buffer.from('already here'));
+    await assert.rejects(
+      () => drive.move(['2610', 'AB1234', '_unsorted', 'T1.pdf'], ['2610', 'AB1234', 'Tutorials']),
+      (e: unknown) => e instanceof GraphError && e.code === 'conflict',
+    );
+    assert.deepEqual(fake.fileBytes(`${rootPath}/2610/AB1234/Tutorials/T1.pdf`), Buffer.from('already here'));
+    assert.deepEqual(fake.fileBytes(`${rootPath}/2610/AB1234/_unsorted/T1.pdf`), Buffer.from('new'));
+    assert.equal(fake.requests.filter((r) => r.method === 'PATCH').length, 0, 'no move was even attempted');
+  });
+
+  it('cannot move a file that is not in _unsorted, whatever the caller asks', async () => {
+    const { drive, fake } = await setup(APP);
+    drive.allowMoveDestinations(['Tutorials']);
+    await drive.ensureFolders(['2610', 'AB1234', 'Lectures']);
+    await drive.upload(['2610', 'AB1234', 'Lectures', 'L1.pdf'], Buffer.from('placed'));
+    await assert.rejects(() => drive.move(['2610', 'AB1234', 'Lectures', 'L1.pdf'], ['2610', 'AB1234', 'Tutorials']), GuardError);
+    assert.equal(fake.requests.filter((r) => r.method === 'PATCH').length, 0);
+  });
 });

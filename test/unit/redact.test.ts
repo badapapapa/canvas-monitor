@@ -1,8 +1,9 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
-import { redact, scrubString } from '../../src/core/redact.ts';
+import { diagnostic, redact, scrubString } from '../../src/core/redact.ts';
+import { GraphError } from '../../src/graph/auth.ts';
 import { createLogger } from '../../src/core/log.ts';
-import { fixedClock } from '../../src/core/clock.ts';
+import { fixedClock, systemClock } from '../../src/core/clock.ts';
 
 describe('redaction', () => {
   it('scrubs emails, matriculation numbers, and Canvas tokens from free text', () => {
@@ -171,5 +172,51 @@ describe('logger', () => {
     log.info('ignored', {});
     log.warn('kept', {});
     assert.equal(lines.length, 1);
+  });
+});
+
+describe('pre-authenticated URLs never print (D-56)', () => {
+  const UPLOAD = 'https://my.microsoftpersonalcontent.com/personal/x/_api/v2.0/drive/items/X/uploadSession?guid=%27g%27&overwrite=False&tempauth=v1e.FAKEPAYLOAD.FAKESIG';
+  const DOWNLOAD = 'https://my.microsoftpersonalcontent.com/personal/x/_layouts/15/download.aspx?UniqueId=u&Translate=false&tempauth=v1e.FAKEPAYLOAD.FAKESIG&ApiVersion=2.0';
+  const DOCS_FORM = 'https://sn3302.up.1drv.com/up/fe6987415ace7X4e1eF866337';
+  const graphItem = {
+    name: 'Lab 04.pdf',
+    uploadUrl: UPLOAD,
+    '@microsoft.graph.downloadUrl': DOWNLOAD,
+    nested: [{ '@content.downloadUrl': DOWNLOAD, note: `see ${DOCS_FORM} and ${UPLOAD}` }],
+  };
+  const leaks = (text: string) => /FAKEPAYLOAD|FAKESIG|fe6987415ace7X4e1eF866337/.test(text);
+
+  it('removes them by key and by value, at any depth', () => {
+    const out = JSON.stringify(redact(graphItem));
+    assert.ok(!leaks(out), out);
+    assert.match(out, /\[credential-url\]/);
+  });
+
+  it('removes them even with every other redaction switched off (--unsafe-log)', () => {
+    const out = JSON.stringify(redact(graphItem, { keepBodies: true, keepIdentity: true }));
+    assert.ok(!leaks(out), out);
+    assert.match(out, /Lab 04\.pdf/, 'names survive, as --unsafe-log intends');
+  });
+
+  it('removes them from free text, e.g. an error message quoting a URL', () => {
+    const out = scrubString(`PUT ${UPLOAD} failed; retry ${DOCS_FORM}`);
+    assert.ok(!leaks(out), out);
+    assert.match(out, /tempauth=\[redacted\]/);
+  });
+
+  it('keeps them out of the logger in unsafe mode, and out of diagnostic()', () => {
+    const lines: string[] = [];
+    const log = createLogger({ runId: 'r', clock: systemClock, unsafe: true, sink: (l) => lines.push(l) });
+    log.info('graph.item', { item: graphItem, message: `upload at ${UPLOAD}` });
+    assert.ok(!leaks(lines.join('\n')), lines.join('\n'));
+    const printed = diagnostic(graphItem);
+    assert.ok(!leaks(printed), printed);
+    assert.match(printed, /Lab 04\.pdf/);
+  });
+
+  it('keeps them out of GraphError messages', () => {
+    const e = new GraphError('server', `PUT ${UPLOAD}: 500`);
+    assert.ok(!leaks(e.message), e.message);
   });
 });

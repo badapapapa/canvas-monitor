@@ -18,6 +18,11 @@ import type { RunContext } from '../../src/core/run-context.ts';
 import { runSync } from '../../src/sync/run.ts';
 import { startServer, sendJson, type FakeServer } from '../helpers/fake-canvas.ts';
 import { FakeGraph, type Recorded } from '../helpers/fake-graph.ts';
+import { addRule } from '../../src/archive/rules.ts';
+import { applyReroutes, planReroutes } from '../../src/archive/reroute.ts';
+import { TokenProvider } from '../../src/graph/auth.ts';
+import { GraphDrive } from '../../src/graph/drive.ts';
+import { RequestGuard, SCOPES, type RootSpec } from '../../src/graph/guard.ts';
 
 interface FakeFile {
   id: number;
@@ -150,7 +155,7 @@ async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = 
     runSync(ctx(dryRun), { telegramApiBase: telegram.url, graphBase: graph.graphBase, loginBase: graph.loginBase });
   const ROOT = `/Apps/${graph.state.appName}`;
   const personalBefore = graph.snapshotOutsideRoot(ROOT);
-  return { logLines, files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
+  return { ctx, logLines, files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
@@ -193,14 +198,21 @@ describe('Phase 4 archive, end to end', () => {
     assert.ok(h.graph.filesUnder(h.ROOT).includes('2610/AB1234/_unsorted/Revision pack.pdf 1000'));
   });
 
-  it('never overwrites: a clash is archived alongside, with the upload date', async () => {
+  it('never overwrites: a clash is archived alongside, with the Canvas week (D-57)', async () => {
     h.graph.plant(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`, Buffer.from('SOMETHING ELSE ALREADY HERE'));
     h.files.push({ id: 2, name: 'Lab 04.pdf', size: 9_000, folder: 8 });
     await h.sync();
     assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`), Buffer.from('SOMETHING ELSE ALREADY HERE'));
-    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04 (uploaded 2026-09-18).pdf`), bytesFor(2, 9_000));
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04 (Week 06).pdf`), bytesFor(2, 9_000));
     const row = await h.client.execute('SELECT target_path FROM files');
-    assert.equal(row.rows[0]?.['target_path'], '2610/AB1234/Labs/Lab 04 (uploaded 2026-09-18).pdf');
+    assert.equal(row.rows[0]?.['target_path'], '2610/AB1234/Labs/Lab 04 (Week 06).pdf');
+  });
+
+  it('falls back to the upload date when the Canvas folder names no week', async () => {
+    h.graph.plant(`${h.ROOT}/2610/AB1234/_unsorted/Notes.pdf`, Buffer.from('SOMETHING ELSE'));
+    h.files.push({ id: 7, name: 'Notes.pdf', size: 500, folder: 1 });
+    await h.sync();
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/_unsorted/Notes (uploaded 2026-09-18).pdf`), bytesFor(7, 500));
   });
 
   it('adopts a file an earlier crashed run already uploaded, instead of duplicating it', async () => {
@@ -473,6 +485,105 @@ describe('Phase 4 archive: every failure says why, and a run where everything fa
     h.graph.plant(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`, Buffer.alloc(9_000, 7));
     await h.sync();
     assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`), Buffer.alloc(9_000, 7), 'untouched');
-    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04 (uploaded 2026-09-18).pdf`), bytesFor(2, 9_000));
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Labs/Lab 04 (Week 06).pdf`), bytesFor(2, 9_000));
+  });
+});
+
+describe('Phase 5: re-route after an approved preview (D-57)', () => {
+  function driveFor(h: H) {
+    const root: RootSpec = { mode: 'appfolder' };
+    const guard = new RequestGuard({ root, graphBase: h.graph.graphBase, loginBase: h.graph.loginBase });
+    let current = 'rt-initial';
+    const tokens = new TokenProvider({
+      clientId: '00000000-0000-0000-0000-000000000001', scope: SCOPES.appfolder, guard, log: silentLogger(), clock: h.clock,
+      loginBase: h.graph.loginBase, refreshToken: () => current, saveRefreshToken: async (t) => void (current = t),
+    });
+    return new GraphDrive({ root, guard, tokens, log: silentLogger(), clock: h.clock, graphBase: h.graph.graphBase, sleep: async () => {} });
+  }
+
+  async function withUnsorted() {
+    const h = await harness();
+    h.files.push(
+      { id: 11, name: 'Case notes.pdf', size: 300, folder: 1 },
+      { id: 12, name: 'Unit-T1.pdf', size: 200, folder: 1 },
+      { id: 13, name: 'Mystery.bin', size: 100, folder: 1 },
+    );
+    await h.sync();
+    assert.deepEqual(h.graph.filesUnder(`${h.ROOT}/2610/AB1234/_unsorted`).length, 3);
+    await addRule(h.db, h.clock, { moduleCode: 'AB1234', field: 'filename', pattern: '\\bcase notes\\b', target: 'Case Study', priority: 10 });
+    await addRule(h.db, h.clock, { moduleCode: 'AB1234', field: 'filename', pattern: '\\bT\\d+\\b', target: 'Tutorials', priority: 20 });
+    return h;
+  }
+
+  it('previews without touching anything, then applies exactly the approved plan', async () => {
+    const h = await withUnsorted();
+    const before = h.graph.requests.length;
+    const plan = await planReroutes(h.ctx());
+    assert.equal(h.graph.requests.length, before, 'the preview makes no Graph request');
+    assert.deepEqual(plan.moves.map((m) => [m.to.split('/').slice(2).join('/'), m.rule.startsWith('db:')]), [
+      ['Case Study/Case notes.pdf', true],
+      ['Tutorials/Unit-T1.pdf', true],
+    ]);
+    assert.deepEqual(plan.staying.map((x) => x.from.split('/').pop()), ['Mystery.bin']);
+
+    await assert.rejects(() => applyReroutes(h.ctx(), driveFor(h), 'not-the-fingerprint'), /plan changed since the preview/);
+    assert.equal(h.graph.requests.filter((r) => r.method === 'PATCH').length, 0, 'a wrong fingerprint moves nothing');
+
+    const result = await applyReroutes(h.ctx(), driveFor(h), plan.fingerprint);
+    assert.deepEqual([result.moved, result.failed.length], [2, 0]);
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Case Study/Case notes.pdf`), bytesFor(11, 300));
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Tutorials/Unit-T1.pdf`), bytesFor(12, 200));
+    assert.deepEqual(h.graph.filesUnder(`${h.ROOT}/2610/AB1234/_unsorted`), ['Mystery.bin 100']);
+    const rows = await h.client.execute("SELECT target_path, route_category, route_reroutable FROM files WHERE route_category <> '_unsorted' ORDER BY target_path");
+    assert.deepEqual(rows.rows.map((r) => [r['route_category'], r['route_reroutable']]), [['Case Study', 0], ['Tutorials', 0]]);
+    assert.equal(h.graph.snapshotOutsideRoot(h.ROOT), h.personalBefore);
+  });
+
+  it('re-routes each file once: a moved file is never planned again, whatever the rules become', async () => {
+    const h = await withUnsorted();
+    await applyReroutes(h.ctx(), driveFor(h), (await planReroutes(h.ctx())).fingerprint);
+    await addRule(h.db, h.clock, { moduleCode: 'AB1234', field: 'filename', pattern: '.*', target: 'Readings', priority: 1 });
+    const again = await planReroutes(h.ctx());
+    assert.deepEqual(again.moves.map((m) => m.from.split('/').pop()), ['Mystery.bin'], 'only the never-moved file');
+  });
+
+  it('changes of plan between preview and apply are refused', async () => {
+    const h = await withUnsorted();
+    const plan = await planReroutes(h.ctx());
+    await addRule(h.db, h.clock, { moduleCode: 'AB1234', field: 'filename', pattern: '\\bmystery\\b', target: 'Readings', priority: 5 });
+    await assert.rejects(() => applyReroutes(h.ctx(), driveFor(h), plan.fingerprint), /plan changed/);
+  });
+
+  it('records a move that happened before a crash, without moving anything again', async () => {
+    const h = await withUnsorted();
+    const plan = await planReroutes(h.ctx());
+    await applyReroutes(h.ctx(), driveFor(h), plan.fingerprint);
+    // Simulate a run that died after the move, before the database update.
+    await h.client.execute("UPDATE files SET route_category = '_unsorted', route_reroutable = 1, target_path = '2610/AB1234/_unsorted/Case notes.pdf' WHERE route_category = 'Case Study'");
+    const patches = h.graph.requests.filter((r) => r.method === 'PATCH').length;
+    const replan = await planReroutes(h.ctx());
+    const result = await applyReroutes(h.ctx(), driveFor(h), replan.fingerprint);
+    assert.deepEqual([result.moved, result.recovered, result.failed.length], [0, 1, 0]);
+    assert.equal(h.graph.requests.filter((r) => r.method === 'PATCH').length, patches);
+  });
+
+  it('never overwrites: a taken destination name fails that file and leaves both untouched', async () => {
+    const h = await withUnsorted();
+    h.graph.plant(`${h.ROOT}/2610/AB1234/Tutorials/Unit-T1.pdf`, Buffer.from('MINE'));
+    const result = await applyReroutes(h.ctx(), driveFor(h), (await planReroutes(h.ctx())).fingerprint);
+    assert.deepEqual([result.moved, result.failed.map((f) => f.reason)], [1, ['conflict 409 destinationTaken']]);
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Tutorials/Unit-T1.pdf`), Buffer.from('MINE'));
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/_unsorted/Unit-T1.pdf`), bytesFor(12, 200));
+  });
+
+  it('routes NEW files by stored rules at once, custom folders included, and says where', async () => {
+    const h = await harness();
+    await h.sync();
+    await addRule(h.db, h.clock, { moduleCode: 'AB1234', field: 'filename', pattern: '\\bcase notes\\b', target: 'Case Study', priority: 10 });
+    h.sent.length = 0;
+    h.files.push({ id: 21, name: 'Case notes 2.pdf', size: 300, folder: 1 });
+    await h.sync();
+    assert.deepEqual(h.graph.fileBytes(`${h.ROOT}/2610/AB1234/Case Study/Case notes 2.pdf`), bytesFor(21, 300));
+    assert.match(content(h).join('\n'), /Case notes 2\.pdf.* → Case Study · <a href=/);
   });
 });

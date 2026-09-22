@@ -3,8 +3,8 @@ import { describe, it } from 'node:test';
 import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { alternateName, collisionKey, fitPath, safeSegment, splitExtension } from '../../src/archive/filename.ts';
-import { route } from '../../src/archive/route.ts';
+import { alternateName, collisionKey, fitPath, safeSegment, splitExtension, weekOf } from '../../src/archive/filename.ts';
+import { route, targetProblem, words, type StoredRule } from '../../src/archive/route.ts';
 import { GuardError, RequestGuard, rootedPath, SCOPES, type RootSpec } from '../../src/graph/guard.ts';
 
 describe('filename sanitising (SPEC.md section 5, required by section 15)', () => {
@@ -302,5 +302,138 @@ describe('structure: only src/graph talks to Microsoft, and only through the gua
         assert.match(window, /guard\.check\(/, `${path.relative(SRC, file)}:${i + 1} sends without a guard check`);
       });
     }
+  });
+});
+
+
+// --- Phase 5: routing (D-57) --------------------------------------------------
+
+describe('routing: words, precedence, stored rules and custom folders (D-57)', () => {
+  const file = (fileName: string, folder: string | null = null) => ({ contextType: 'course' as const, folder, module: null, fileName });
+  const rule = (id: number, field: StoredRule['field'], pattern: string, target: string, priority = 100): StoredRule => ({ id, field, pattern, target, priority });
+
+  it('reads underscores and hyphens as word breaks', () => {
+    assert.equal(words('Tutorials_Practicals'), 'Tutorials Practicals');
+    assert.equal(route(file('dataset.xlsx', 'Tutorials_Practicals')).category, 'Tutorials');
+  });
+
+  it('routes "Tutorial" in a filename, and still never matches inside a word', () => {
+    assert.equal(route(file('Week 1 Tutorial - Blank.pdf', 'unfiled')).category, 'Tutorials');
+    assert.equal(route(file('Institute brochure.pdf')).category, '_unsorted');
+  });
+
+  it('lets the folder decide before the filename', () => {
+    assert.equal(route(file('Tutorial prep.pdf', 'Week 06/Practical Lab')).category, 'Labs');
+  });
+
+  it('applies stored rules first, by priority, including custom folders and extensions', () => {
+    const rules = [
+      rule(2, 'filename', '\\bhandout\\b', 'Tutorials', 30),
+      rule(1, 'filename', '\\bexam review\\b', 'Exam Review', 10),
+      rule(3, 'extension', 'pptx,ppt', 'Lectures', 40),
+      rule(4, 'folder', '\\bcase study\\b', 'Case Study', 10),
+    ];
+    assert.deepEqual(
+      [route(file('Exam Review Deck.pdf', 'unfiled'), rules), route(file('Handout Week 2.docx'), rules), route(file('Deck-1.pptx'), rules), route(file('x.zip', 'Case Study'), rules)]
+        .map((d) => [d.category, d.rule, d.reroutable]),
+      [['Exam Review', 'db:1', false], ['Tutorials', 'db:2', false], ['Lectures', 'db:3', false], ['Case Study', 'db:4', false]],
+    );
+  });
+
+  it('ignores a stored rule whose target is unsafe or reserved, or whose pattern is broken', () => {
+    const bad = [rule(1, 'filename', '.*', '../Documents'), rule(2, 'filename', '.*', '_unsorted'), rule(3, 'filename', '(', 'Lectures')];
+    assert.equal(route(file('anything.pdf'), bad).category, '_unsorted');
+  });
+
+  it('validates custom folder names', () => {
+    assert.equal(targetProblem('Harbour Case Study'), null);
+    for (const t of ['a/b', '..', '_unsorted', '_probe', 'Group', 'CON', 'x'.repeat(61), 'trailing.']) assert.notEqual(targetProblem(t), null, t);
+  });
+
+  it('names a collision by its Canvas week when there is one, else by date', () => {
+    assert.equal(weekOf('Weekly Learning Materials/Week 3/Lecture Notes'), '03');
+    assert.equal(alternateName('src.zip', '2026-09-18', 1, 'Weekly Learning Materials/Week 03/Lecture Notes'), 'src (Week 03).zip');
+    assert.equal(alternateName('src.zip', '2026-09-18', 2, 'Week 03'), 'src (Week 03, 2).zip');
+    assert.equal(alternateName('src.zip', '2026-09-18', 1, 'unfiled'), 'src (uploaded 2026-09-18).zip');
+  });
+});
+
+// --- Phase 5: the move exception (D-57) ---------------------------------------
+
+describe('guard: the re-route move, and nothing wider', () => {
+  const byId = (id: string) => `${G}/me/drive/items/${encodeURIComponent(id)}`;
+  const move = (parent: string) => ({ parentReference: { id: parent } });
+  /** A guard that has seen: the term/module folder tree, an _unsorted file, and a 404 at the landing path. */
+  function primed(dest = 'Tutorials', opts: { allow?: string[]; absent?: boolean } = {}) {
+    const g = new RequestGuard({ root: APP });
+    const p = (segs: string[]) => `${G}${rootedPath(APP, segs)}`;
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234']), headers: auth }, 200, { id: 'MOD', folder: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234', dest]), headers: auth }, 200, { id: 'DEST', folder: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'CD5678', dest]), headers: auth }, 200, { id: 'OTHERMOD', folder: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234', 'Tutorials', 'Deep']), headers: auth }, 200, { id: 'DEEP', folder: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234', '_unsorted']), headers: auth }, 200, { id: 'UNSORTED', folder: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234', '_unsorted', 'T1.pdf']), headers: auth }, 200, { id: 'FILE', file: {} });
+    g.observe({ method: 'GET', url: p(['2610', 'AB1234', 'Lectures', 'L1.pdf']), headers: auth }, 200, { id: 'PLACED', file: {} });
+    if (opts.absent !== false) g.observe({ method: 'GET', url: p(['2610', 'AB1234', dest, 'T1.pdf']), headers: auth }, 404, {});
+    g.allowMoveDestinations(opts.allow ?? ['Tutorials', 'Lectures', 'Labs', 'Readings', 'Assignments']);
+    return g;
+  }
+
+  it('allows exactly one move of a learned _unsorted file into a learned, allowed sibling folder whose name is confirmed absent', () => {
+    const g = primed();
+    allowed(g, 'PATCH', byId('FILE'), move('DEST'));
+    // Re-confirm the landing path absent, so only the spent learning can refuse.
+    g.observe({ method: 'GET', url: `${G}${rootedPath(APP, ['2610', 'AB1234', 'Tutorials', 'T1.pdf'])}`, headers: auth }, 404, {});
+    refused(g, 'PATCH', byId('FILE'), move('DEST')); // the learning is spent
+  });
+
+  it('allows a custom destination only when a stored rule named it', () => {
+    refused(primed('Harbour Case Study'), 'PATCH', byId('FILE'), move('DEST'));
+    allowed(primed('Harbour Case Study', { allow: ['Harbour Case Study'] }), 'PATCH', byId('FILE'), move('DEST'));
+  });
+
+  it('refuses a destination that is not a direct child of the same <term>/<module>/', () => {
+    // Everything else is made to pass -- landing paths confirmed absent, every
+    // name allowed -- so only the destination constraint can refuse these.
+    const isolated = () => {
+      const g = primed('Tutorials', { allow: ['Tutorials', 'Deep', 'AB1234', 'CD5678'] });
+      const p = (segs: string[]) => `${G}${rootedPath(APP, segs)}`;
+      for (const landing of [['2610', 'CD5678', 'Tutorials', 'T1.pdf'], ['2610', 'AB1234', 'Tutorials', 'Deep', 'T1.pdf'], ['2610', 'AB1234', 'T1.pdf']]) {
+        g.observe({ method: 'GET', url: p(landing), headers: auth }, 404, {});
+      }
+      return g;
+    };
+    refused(isolated(), 'PATCH', byId('FILE'), move('OTHERMOD')); // another module
+    refused(isolated(), 'PATCH', byId('FILE'), move('DEEP')); // a grandchild
+    refused(isolated(), 'PATCH', byId('FILE'), move('MOD')); // the module folder itself
+    refused(isolated(), 'PATCH', byId('FILE'), move('UNSORTED')); // back into _unsorted
+    allowed(isolated(), 'PATCH', byId('FILE'), move('DEST')); // the control: the one legal move passes
+  });
+
+  it('refuses when the landing name was not confirmed absent', () => {
+    refused(primed('Tutorials', { absent: false }), 'PATCH', byId('FILE'), move('DEST'));
+  });
+
+  it('refuses items not learned in _unsorted, unknown folders, and anything but a bare parentReference', () => {
+    refused(primed(), 'PATCH', byId('PLACED'), move('DEST')); // already placed: route-once
+    refused(primed(), 'PATCH', byId('UNKNOWN'), move('DEST'));
+    refused(primed(), 'PATCH', byId('FILE'), move('NOT-LEARNED'));
+    refused(primed(), 'PATCH', byId('FILE'), { ...move('DEST'), name: 'renamed.pdf' });
+    refused(primed(), 'PATCH', byId('FILE'), { parentReference: { id: 'DEST', path: '/drive/root:/Documents' } });
+    refused(primed(), 'PATCH', `${byId('FILE')}?%40microsoft.graph.conflictBehavior=replace`, move('DEST'));
+    refused(primed(), 'PUT', byId('FILE'), move('DEST'));
+    refused(primed(), 'DELETE', byId('FILE'));
+  });
+
+  it('forgets an absence once something writes to that path', () => {
+    const g = primed();
+    allowed(g, 'POST', `${G}${rootedPath(APP, ['2610', 'AB1234', 'Tutorials', 'T1.pdf'], 'createUploadSession')}`, session('T1.pdf'));
+    refused(g, 'PATCH', byId('FILE'), move('DEST'));
+  });
+
+  it('never allows _unsorted or an unsafe name as a destination', () => {
+    const g = new RequestGuard({ root: APP });
+    assert.throws(() => g.allowMoveDestinations(['_unsorted']), GuardError);
+    assert.throws(() => g.allowMoveDestinations(['a/b']), GuardError);
   });
 });

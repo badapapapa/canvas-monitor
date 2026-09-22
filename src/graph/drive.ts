@@ -99,10 +99,12 @@ export class GraphDrive {
 
   // --- the one place Graph is called -----------------------------------------
 
-  private async request<T>(method: 'GET' | 'POST', path: string, body?: unknown, query = ''): Promise<T> {
+  private async request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown, query = ''): Promise<T> {
     const url = `${this.base}${path}${query}`;
     const payload = body === undefined ? undefined : JSON.stringify(body);
-    const attempts = this.o.maxAttempts ?? 4;
+    // A move is never retried: the guard allows each learned move once, and a
+    // retry after an ambiguous failure is for the caller to decide (D-57).
+    const attempts = method === 'PATCH' ? 1 : (this.o.maxAttempts ?? 4);
     let refreshed = false;
 
     for (let attempt = 1; ; attempt += 1) {
@@ -128,6 +130,10 @@ export class GraphDrive {
         return json as T;
       }
       const errorBody = (await response.json().catch(() => ({}))) as GraphErrorBody;
+      // A 404 on a rooted path is how the guard confirms a name is absent (D-57).
+      if (response.status === 404 && method === 'GET') {
+        this.o.guard.observe({ method, url, headers, ...(payload === undefined ? {} : { body: payload }) }, 404, errorBody);
+      }
 
       if (response.status === 401 && !refreshed) {
         refreshed = true;
@@ -191,6 +197,29 @@ export class GraphDrive {
   }
 
   // --- writes: create only ---------------------------------------------------
+
+  /** Folder names a re-route may move into (the guard enforces it, D-57). */
+  allowMoveDestinations(names: Iterable<string>): void {
+    this.o.guard.allowMoveDestinations(names);
+  }
+
+  /**
+   * Move a file from <term>/<module>/_unsorted/<name> into <term>/<module>/<folder>/,
+   * keeping its name. The destination name must be absent, checked here and by
+   * the guard; a taken name is a conflict, never an overwrite.
+   */
+  async move(source: readonly string[], destFolder: readonly string[]): Promise<DriveItem> {
+    const name = source[source.length - 1]!;
+    const item = await this.itemAt(source);
+    if (item === null) throw new GraphError('not_found', `nothing at the source path`, 404, 'itemNotFound');
+    if (item.folder !== undefined) throw new GraphError('conflict', 'the source is a folder', null, 'sourceIsFolder');
+    await this.ensureFolders(destFolder);
+    const destId = this.knownFolders.get(destFolder.join('/').toLowerCase());
+    if (destId === undefined) throw new GraphError('malformed', 'destination folder id unknown after ensureFolders');
+    const clash = await this.itemAt([...destFolder, name]);
+    if (clash !== null) throw new GraphError('conflict', 'the destination name is taken', 409, 'destinationTaken');
+    return this.request<DriveItem>('PATCH', `/me/drive/items/${encodeURIComponent(item.id)}`, { parentReference: { id: destId } });
+  }
 
   /**
    * Create each missing folder along the path. Never replaces anything.
