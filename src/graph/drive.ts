@@ -208,7 +208,12 @@ export class GraphDrive {
    * keeping its name. The destination name must be absent, checked here and by
    * the guard; a taken name is a conflict, never an overwrite.
    */
-  async move(source: readonly string[], destFolder: readonly string[]): Promise<DriveItem> {
+  async move(
+    source: readonly string[],
+    destFolder: readonly string[],
+    /** Test seam: runs between the absence check and the PATCH, to model a race. */
+    options: { beforePatch?: () => Promise<void> } = {},
+  ): Promise<DriveItem> {
     const name = source[source.length - 1]!;
     const item = await this.itemAt(source);
     if (item === null) throw new GraphError('not_found', `nothing at the source path`, 404, 'itemNotFound');
@@ -218,6 +223,7 @@ export class GraphDrive {
     if (destId === undefined) throw new GraphError('malformed', 'destination folder id unknown after ensureFolders');
     const clash = await this.itemAt([...destFolder, name]);
     if (clash !== null) throw new GraphError('conflict', 'the destination name is taken', 409, 'destinationTaken');
+    await options.beforePatch?.();
     return this.request<DriveItem>('PATCH', `/me/drive/items/${encodeURIComponent(item.id)}`, { parentReference: { id: destId } });
   }
 

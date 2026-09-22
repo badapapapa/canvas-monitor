@@ -1850,7 +1850,17 @@ The drive never retries a move. Tests cover each constraint, including one
 where everything else is made to pass so that only the destination rule can
 refuse. Seven mutation-check entries (32–38).
 
-**Unverified until the live test:** Microsoft's move documentation says
-nothing about a name clash (no `conflictBehavior` for moves). The design
-never relies on it, because it confirms the name absent first. The fake
-assumes a 409.
+**Live test, 2026-09-22** (approved; `scripts/live-move-test.ts`; every
+request through the guard; probe files only, in `2610/_probe/`; printed only
+through `diagnostic()`):
+- *A normal move* worked. The file kept **its item id and its `webUrl`**, so
+  OneDrive links in notifications already sent keep working after a re-route.
+- *The case the documentation leaves open:* drive A confirmed the landing name
+  absent, then a second, independent guarded drive uploaded a file to that
+  name, and A's move was sent anyway. OneDrive answered **409
+  `nameAlreadyExists`** and changed neither file (hashes verified). A clash on
+  a move fails safe, as the fake assumed.
+- Created, for deletion by hand: the folder `2610/_probe/` holding
+  `_unsorted/probe-b.txt`, `Tutorials/probe-a.txt` (moved there) and
+  `Tutorials/probe-b.txt`. Every upload session completed, so there are no
+  placeholders.

@@ -270,7 +270,8 @@ export class FakeGraph {
     const graphPath = req.url?.slice('/v1.0'.length).split('?')[0] ?? '';
 
     // Move (D-57): PATCH an item's parentReference. The item keeps its id.
-    // ASSUMPTION until the live test: a name clash at the destination is a 409.
+    // Observed live 2026-09-22 (D-57): a name clash at the destination is a
+    // 409 nameAlreadyExists, and neither file changes.
     const moveOf = /^\/me\/drive\/items\/([^/:]+)$/.exec(graphPath);
     if (moveOf !== null && method === 'PATCH') {
       const moved = this.nodeById(decodeURIComponent(moveOf[1]!));

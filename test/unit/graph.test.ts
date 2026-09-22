@@ -280,3 +280,20 @@ describe('the re-route move (D-57)', () => {
     assert.equal(fake.requests.filter((r) => r.method === 'PATCH').length, 0);
   });
 });
+
+describe('the re-route move under a race (D-57)', () => {
+  it('reports a name taken between the check and the move as a conflict, and overwrites nothing', async () => {
+    const { drive, fake, rootPath } = await setup(APP);
+    drive.allowMoveDestinations(['Tutorials']);
+    await drive.ensureFolders(['2610', 'AB1234', '_unsorted']);
+    await drive.upload(['2610', 'AB1234', '_unsorted', 'T1.pdf'], Buffer.from('mine'));
+    await assert.rejects(
+      () => drive.move(['2610', 'AB1234', '_unsorted', 'T1.pdf'], ['2610', 'AB1234', 'Tutorials'], {
+        beforePatch: async () => void fake.plant(`${rootPath}/2610/AB1234/Tutorials/T1.pdf`, Buffer.from('raced in')),
+      }),
+      (e: unknown) => e instanceof GraphError && e.code === 'conflict',
+    );
+    assert.deepEqual(fake.fileBytes(`${rootPath}/2610/AB1234/Tutorials/T1.pdf`), Buffer.from('raced in'));
+    assert.deepEqual(fake.fileBytes(`${rootPath}/2610/AB1234/_unsorted/T1.pdf`), Buffer.from('mine'));
+  });
+});
