@@ -1963,3 +1963,99 @@ migration and every data change to the production database is announced, with
 the exact command, and run by me** -- including when it is needed for a preview.
 The same holds for the rules rows written that day. Nothing in the archive or
 its database changes without that.
+
+---
+
+## D-60 — Phase 8, the dashboard: decisions recorded, nothing built · 2026-09-23
+
+Order: Phase 6 (answer-sheet follow-ups) next, then Phase 8. **Phase 7
+(versioning, reconciliation, search) is deferred.**
+
+Recorded now so they do not drift before the build:
+- **Hosting:** Vercel, behind a password. Next.js, reading the same Turso
+  database.
+- **Read-only, enforced in code.** The dashboard's database access cannot
+  write, and a test proves it, so no dashboard bug can ever change archive
+  state. (The same idea as the mirror's `readOnlyDb`, D-59, but for a separate
+  codebase and credential. Prefer a Turso read-only token as well, if one can
+  be scoped that way. That is to be verified at build time, not assumed.)
+- **"New" means new since my last visit.** No mark-as-read.
+- **Views:** a main view and a per-module view. No week-by-week layout.
+  Search is deferred (with Phase 7).
+- The follow-up **dismiss** moves from the CLI to a dashboard button later.
+  That button is the one write the dashboard would need, so it must be
+  designed against the read-only rule above, not around it: not decided yet.
+
+---
+
+## D-61 — Phase 6 as built: answer-sheet follow-ups · built 2026-09-23; not live
+
+**Where this departs from SPEC §10, by the owner's scope:**
+1. **Only numbered files take part.** A file opens a follow-up only if it was
+   routed into Tutorials or Labs *and* its name carries that category's number:
+   `T3`, `Tutorial 1`, `Tut 2`, `Tutorial03` for Tutorials; `Lab 04`, `Lab4`,
+   `Practical Lab 03`, `Practical 2` for Labs. SPEC's fallback to a normalised
+   stem is dropped. A numberless file (resources, scaffolding, datasets, class
+   lists) would sit open all term and teach me to ignore the list.
+2. **No separate "answers posted" message.** A close shows as one line,
+   `✅ closes <module> Tutorial 3`, on the notification already being sent for
+   the answer file. It is added at send time, like the OneDrive link (D-52).
+3. **No PDF-text scanning.** Filenames only, for now.
+4. **SPEC's seed words are cut to the safe ones.** Generic answer words in code:
+   `answer(s)`, `solution(s)`, `soln(s)`. SPEC's `key`, `model`, `worked`, `sol`
+   and `ans` are gone: "Data Model Tutorial" is not an answer file. Anything
+   module-specific goes in `answer_patterns`, never the repository.
+5. **Partial answers are the owner's ruling**: `followup_partial_answers` =
+   `close` | `keep_open`, with **no default**. Until it is set, the stage does
+   nothing at all.
+
+**Matching.** Names are split into words exactly as routing splits them
+(D-57), and matched as whole words: "transient" and "resolution" are not
+answers. The pairing key is (context, category, number). The number is
+normalised (`04` → `4`) and compared exactly, so Tutorial 1's answers can never
+close Tutorial 11. Only one- or two-digit numbers after a designator count, so
+years, dates, module codes and "Week 03" never do.
+
+**Lifecycle.** One `followups` row per key, ever:
+- answers present when the question is first tracked (earlier, or in the same
+  run): recorded closed, `answered_on_arrival`, silently;
+- the earliest later answer closes an open one (`answers`, announced as a line
+  on its notification); further answer files do nothing;
+- a revised question under a dated or week name has the same number, so no
+  second follow-up;
+- **one nudge**, 10 days after the question, never repeated (`nudged_at`, and a
+  per-follow-up send key the queue itself refuses to enqueue twice);
+- expired at term end, from Canvas's `term.end_at`, refreshed daily into
+  `courses.term_end_at`;
+- dismissed by hand: `npm run followups -- dismiss <id>`.
+
+**The first run** builds all of this from what is already archived, silently,
+and sends **one** summary ("Tracking 5: … awaiting answers"). A follow-up
+already past 10 days shows its age there and is marked nudged, so it never gets
+a nudge of its own. The summary has a fixed send key, so a retried first run
+cannot send it twice. Everything goes through the existing queue (quiet hours,
+batching). The mirror is untouched.
+
+**`tune-patterns` on the real archive (read-only, 2026-09-23).** 85 files gave
+8 candidate pairs:
+- 5 real pairs, all explained by words already in code: one module's
+  "- Suggested Solutions" (`solutions`, 3 pairs) and another's "-Answers"
+  (`answers`, 2 pairs). "suggested" never appears without "solutions".
+  **Nothing module-specific needs storing.**
+- 3 noise pairs from the subset rule (a case-study file against two others
+  sharing its one word; a slide deck against its PDF). None is an answer file.
+- Missed by the report, but not by the classifier: a partial answer adds four
+  words, over the report's three-word limit.
+
+**Tests:** 22 classifier and planner tests (substrings, number forms, weeks and
+years, 1 vs 11, partials, both rulings, the 10-day boundary, term end) and 7
+through a whole sync. Nine mutation-check entries (43–51) cover: substring
+matching, pairing by whole filename, first-digit-only numbers, numberless files
+opening, a second nudge, a nudge during the first run, a first-run follow-up
+left to be nudged later, an on-arrival pair announced as a close, and a partial
+closing without a ruling.
+
+**Found by the end-to-end test, and fixed:** the close line was first filtered
+out for any follow-up the *first run* had opened. That is the main real case --
+opened by the first run, answered weeks later. The rule is now carried by the
+close reason, not the row: only `answers` closes are announced.

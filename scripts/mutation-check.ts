@@ -33,6 +33,7 @@ const PURE = 'test/unit/archive-pure.test.ts';
 const GRAPH = 'test/unit/graph.test.ts';
 const ARCHIVE = 'test/unit/archive.test.ts';
 const MIRROR = 'test/unit/mirror.test.ts';
+const FOLLOWUPS = 'test/unit/followups.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -337,6 +338,70 @@ const MUTATIONS: Mutation[] = [
     from: '    if (sha256Of(from) !== entry.copiedSha256) {',
     to: '    if (false) {',
     tests: [MIRROR],
+  },
+  // --- D-61: answer-sheet follow-ups ----------------------------------------
+  {
+    name: 'match answer words as substrings ("transient", "resolution" become answers)',
+    file: 'src/followups/classify.ts',
+    from: 'return tokens.some((t) => GENERIC_ANSWER_TOKENS.has(t)) ||',
+    to: "return [...GENERIC_ANSWER_TOKENS].some((w) => tokens.join(' ').includes(w)) ||",
+    tests: [FOLLOWUPS],
+  },
+  {
+    name: 'pair by whole filename, losing the number',
+    file: 'src/followups/plan.ts',
+    from: 'const id = `${file.contextId}|${category}|${c.number}`;',
+    to: 'const id = `${file.contextId}|${category}|${file.title}`;',
+    tests: [FOLLOWUPS, ARCHIVE],
+  },
+  {
+    name: "read only the first digit, so Tutorial 1's answers close Tutorial 11",
+    file: 'src/followups/classify.ts',
+    from: 'Tutorials: { words: new Set([\'tutorial\', \'tut\']), joined: /^(?:t|tut|tutorial)(\\d{1,2})$/ },',
+    to: 'Tutorials: { words: new Set([\'tutorial\', \'tut\']), joined: /^(?:t|tut|tutorial)(\\d)/ },',
+    tests: [FOLLOWUPS],
+  },
+  {
+    name: 'let a file with no number open a follow-up',
+    file: 'src/followups/classify.ts',
+    from: '  const number = extractNumber(tokens, category);\n',
+    to: "  const number = extractNumber(tokens, category) ?? '0';\n",
+    tests: [FOLLOWUPS, ARCHIVE],
+  },
+  {
+    name: 'nudge a follow-up that was already nudged',
+    file: 'src/followups/plan.ts',
+    from: 'if (!input.baseline && row.nudgedAt === null && age >= NUDGE_AFTER_MS) {',
+    to: 'if (!input.baseline && age >= NUDGE_AFTER_MS) {',
+    tests: [FOLLOWUPS],
+  },
+  {
+    name: 'nudge during the silent first run',
+    file: 'src/followups/plan.ts',
+    from: 'if (!input.baseline && row.nudgedAt === null && age >= NUDGE_AFTER_MS) {',
+    to: 'if (row.nudgedAt === null && age >= NUDGE_AFTER_MS) {',
+    tests: [FOLLOWUPS],
+  },
+  {
+    name: 'leave a first-run follow-up past 10 days un-nudged, so it gets a nudge later',
+    file: 'src/followups/stage.ts',
+    from: 'const nudged = baseline && o.pastNudge ? at : null;',
+    to: 'const nudged = null;',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'announce a pair that was answered on arrival as a "close"',
+    file: 'src/followups/stage.ts',
+    from: "VALUES (?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?, 'answered_on_arrival')",
+    to: "VALUES (?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?, 'answers')",
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'a partial answer closes its follow-up without a ruling',
+    file: 'src/followups/plan.ts',
+    from: "      if (input.partialPolicy !== 'close') continue;\n",
+    to: '',
+    tests: [FOLLOWUPS],
   },
 ];
 

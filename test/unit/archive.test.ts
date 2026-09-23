@@ -587,3 +587,92 @@ describe('Phase 5: re-route after an approved preview (D-57)', () => {
     assert.match(content(h).join('\n'), /Case notes 2\.pdf.* → Case Study · <a href=/);
   });
 });
+
+describe('Phase 6: follow-ups through a whole sync (D-61)', () => {
+  const followupMessages = (h: H) => content(h).filter((t) => /Answer follow-ups|Answers still not posted/.test(t));
+  async function enable(h: H) {
+    await setConfig(h.db, h.clock, 'followups_enabled', 'true');
+    await setConfig(h.db, h.clock, 'followup_partial_answers', 'keep_open');
+  }
+  const rows = async (h: H) =>
+    (await h.client.execute('SELECT category, number, state, close_reason, baseline, nudged_at FROM followups ORDER BY number')).rows.map((r) =>
+      [r['number'], r['state'], r['close_reason'], Number(r['baseline']), r['nudged_at'] === null ? 'not nudged' : 'nudged']);
+
+  it('first run: records everything silently and sends ONE summary', async () => {
+    const h = await harness();
+    await enable(h);
+    h.files.push(
+      { id: 31, name: 'Lab 03.pdf', size: 100, folder: 8 },
+      { id: 32, name: 'Lab 03 - Suggested Solutions.pdf', size: 100, folder: 8 },
+      { id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 },
+      { id: 34, name: 'starter-kit.zip', size: 100, folder: 8 },
+    );
+    await h.sync();
+    assert.deepEqual(followupMessages(h).length, 1, content(h).join('\n---\n'));
+    assert.match(followupMessages(h)[0]!, /Tracking 1: AB1234 Lab 4 awaiting answers\./);
+    assert.doesNotMatch(content(h).join('\n'), /closes/, 'a pair recorded on the first run closes nothing anyone saw open');
+    assert.deepEqual(await rows(h), [['3', 'closed', 'answered_on_arrival', 1, 'not nudged'], ['4', 'open', null, 1, 'not nudged']]);
+  });
+
+  it('closes on the answer file\'s own notification, with no separate message', async () => {
+    const h = await harness();
+    await enable(h);
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
+    await h.sync();
+    const before = followupMessages(h).length;
+    h.files.push({ id: 35, name: 'Lab 04 - Suggested Solutions.pdf', size: 100, folder: 8 });
+    await h.sync();
+    assert.match(content(h).join('\n'), /Lab 04 - Suggested Solutions\.pdf[\s\S]*✅ closes AB1234 Lab 4/);
+    assert.equal(followupMessages(h).length, before, 'no message of its own');
+    assert.deepEqual((await rows(h)).map((r) => [r[0], r[1], r[2]]), [['4', 'closed', 'answers']]);
+  });
+
+  it('announces no close when question and answers arrive in the same run: nothing was open', async () => {
+    const h = await harness();
+    await enable(h);
+    await h.sync();
+    h.files.push({ id: 38, name: 'Lab 07.pdf', size: 100, folder: 8 }, { id: 39, name: 'Lab 07 - Suggested Solutions.pdf', size: 100, folder: 8 });
+    await h.sync();
+    assert.match(content(h).join('\n'), /Lab 07 - Suggested Solutions\.pdf/);
+    assert.doesNotMatch(content(h).join('\n'), /closes/);
+    assert.deepEqual((await rows(h)).map((r) => [r[0], r[1], r[2]]), [['7', 'closed', 'answered_on_arrival']]);
+  });
+
+  it('nudges once after 10 days, and never again', async () => {
+    const h = await harness();
+    await enable(h);
+    await h.sync(); // first run, nothing open
+    h.files.push({ id: 36, name: 'Lab 05.pdf', size: 100, folder: 8 });
+    await h.sync();
+    h.clock.set('2026-09-28T12:30:00Z');
+    await h.sync();
+    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 1);
+    assert.match(content(h).join('\n'), /AB1234 Lab 5: no answers after 10 days/);
+    h.clock.set('2026-10-05T12:30:00Z');
+    await h.sync();
+    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 1, 'never repeated');
+  });
+
+  it('shows the age of a baseline follow-up past 10 days in the summary, and never nudges it', async () => {
+    const h = await harness();
+    h.files.push({ id: 37, name: 'Lab 06.pdf', size: 100, folder: 8 });
+    await h.sync(); // follow-ups not on yet: the file is only seen
+    h.clock.set('2026-09-30T13:00:00Z');
+    await enable(h);
+    await h.sync(); // the first follow-up run, 12 days after the question
+    assert.match(followupMessages(h).join('\n'), /Tracking 1: AB1234 Lab 6 \(Lab 6: 12 days\) awaiting answers\./);
+    h.clock.set('2026-10-03T13:00:00Z');
+    await h.sync();
+    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 0);
+  });
+
+  it('does nothing at all until the partial-answer ruling is set', async () => {
+    const h = await harness();
+    await setConfig(h.db, h.clock, 'followups_enabled', 'true');
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
+    const outcome = await h.sync();
+    assert.equal(outcome.followups?.status, 'awaiting_ruling');
+    assert.equal(followupMessages(h).length, 0);
+    assert.deepEqual(await rows(h), []);
+  });
+});

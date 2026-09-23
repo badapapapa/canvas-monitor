@@ -30,6 +30,7 @@ import { runTelegramTest } from './telegram-test.ts';
 import { runGraphLogin } from './graph-login.ts';
 import { runReroute, runRules } from './reroute.ts';
 import { runMirrorCli } from './mirror.ts';
+import { runFollowupsCli, runTunePatterns } from './followups.ts';
 import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
@@ -51,6 +52,11 @@ Commands:
                            add --module <code> --field folder|module|filename|extension
                                --pattern <regex|ext,list> --target <folder> [--priority N]
   mirror [--baseline]      Local only: copy NEW archive files into my own folders (D-58).
+  tune-patterns            Read-only: rank the words that mark answer files, with their pairs (D-61).
+  followups [preview]      Read-only: what follow-ups would open, close and ignore (D-61).
+  followups list [--all]   Open follow-ups (--all: every state).
+  followups dismiss <id>   Close one by hand ("answers were only given in class").
+  followups phrases [add]  Module-specific answer phrases: add --module <code> --phrase "<words>".
   reroute --preview        Show where each _unsorted file would move. Moves nothing.
   reroute --apply <fp>     Move exactly the previewed plan, once per file (D-40, D-57).
   set-config <key>         Set a config value, read from stdin (never argv).
@@ -98,6 +104,8 @@ async function main(argv: string[]): Promise<number> {
         priority: { type: 'string' },
         baseline: { type: 'boolean', default: false },
         config: { type: 'string' },
+        phrase: { type: 'string' },
+        all: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
     });
@@ -144,6 +152,13 @@ async function main(argv: string[]): Promise<number> {
       return await withoutRunRecord('migrate', dryRun);
     case 'mirror':
       return await runMirrorCli({ dryRun, baseline: values.baseline === true, config: values.config });
+    case 'tune-patterns':
+      return await withReadOnlyRun('tune-patterns', unsafeLog, (ctx) => runTunePatterns(ctx));
+    case 'followups':
+      return positionals[1] === 'preview' || positionals[1] === undefined
+        ? await withReadOnlyRun('followups-preview', unsafeLog, (ctx) => runFollowupsCli(ctx, { action: 'preview', rest: [] }))
+        : await withRun('followups', dryRun, unsafeLog, async (ctx) =>
+            runFollowupsCli(ctx, { action: positionals[1], rest: [...positionals.slice(2), ...(values.all === true ? ['--all'] : [])], ...(values.module === undefined ? {} : { module: values.module }), ...(values.phrase === undefined ? {} : { phrase: values.phrase }) }));
     case 'rules':
       return await withRun('rules', dryRun, unsafeLog, async (ctx) =>
         runRules(ctx, { action: positionals[1], rest: positionals.slice(2), opts: { module: values.module, field: values.field, pattern: values.pattern, target: values.target, priority: values.priority } }));
@@ -266,6 +281,16 @@ async function withRun(
     }
     throw error;
   }
+}
+
+/**
+ * A run whose database access is read-only (D-59): no runs row, and the
+ * dry-run writer, so the command structurally cannot write -- while dry_run
+ * in the log stays false, because it is not a --dry-run.
+ */
+async function withReadOnlyRun(command: string, unsafeLog: boolean, body: (ctx: RunContext) => Promise<number>): Promise<number> {
+  const ctx = await startRun({ command, dryRun: false, unsafeLog, recordRun: false, readOnlyDb: true });
+  return body(ctx);
 }
 
 /**

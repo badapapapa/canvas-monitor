@@ -45,6 +45,7 @@ function summaryOf(o: SyncOutcome): Record<string, unknown> {
       archived: o.archive.archived.length, adopted: o.archive.adopted, skipped: o.archive.skipped,
       failed: o.archive.failed, planned: o.archive.planned, stopped: o.archive.stopped,
     },
+    followups: o.followups,
   };
 }
 
@@ -60,8 +61,23 @@ function line(o: SyncOutcome): string {
     o.alerts !== null && o.alerts.raised.length > 0 ? `${o.alerts.raised.length} alert(s) raised` : null,
     o.alerts !== null && o.alerts.resolved.length > 0 ? `${o.alerts.resolved.length} resolved` : null,
     archiveLine(o),
+    followupLine(o),
   ];
   return parts.filter((p) => p !== null).join(', ');
+}
+
+function followupLine(o: SyncOutcome): string | null {
+  const f = o.followups;
+  if (f === null) return null;
+  if (f.status === 'awaiting_ruling') return 'Follow-ups: waiting for followup_partial_answers';
+  const bits = [
+    f.baseline ? 'first run' : null,
+    f.opened > 0 ? `${f.opened} opened` : null,
+    f.closed > 0 ? `${f.closed} closed` : null,
+    f.nudged > 0 ? `${f.nudged} nudged` : null,
+    f.expired > 0 ? `${f.expired} expired` : null,
+  ].filter((b) => b !== null);
+  return bits.length === 0 ? null : `Follow-ups: ${bits.join(', ')}`;
 }
 
 function archiveLine(o: SyncOutcome): string | null {

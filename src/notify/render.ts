@@ -38,6 +38,8 @@ export interface RenderItem {
     route?: string | null;
     archiveUrl?: string | null;
     archiveState?: string | null;
+    /** Filled in at send time: the follow-up this file's answers close (D-61). */
+    closes?: string | null;
   };
 }
 
@@ -232,6 +234,7 @@ function renderItem(item: RenderItem, now: Date): string {
         const verb = change?.transition === 'available' ? '📄 Now available: ' : '📄 ';
         lines.push(`${verb}${target}${detail === '' ? '' : ` — ${escapeHtml(detail)}`}${archiveSuffix(f)}`);
       }
+      if (f?.closes !== undefined && f.closes !== null) lines.push(`✅ closes ${escapeHtml(f.closes)}`);
       break;
     }
     case 'comment': {

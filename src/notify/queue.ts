@@ -12,6 +12,7 @@
  * at-least-once cost, stated rather than hidden.
  */
 
+import { followupLabel, type FollowupCategory } from '../followups/classify.ts';
 import { sha256 } from '../ingest/normalise.ts';
 import { isQuietHours, quietHoursReleaseAt } from '../core/time.ts';
 import type { Db, TxHandle } from '../core/db/writer.ts';
@@ -123,6 +124,21 @@ async function enrichFiles(db: Db, payload: Payload): Promise<void> {
     item.file.route = row['route_category'] === null ? null : String(row['route_category']);
     item.file.archiveUrl = row['share_url'] === null ? null : String(row['share_url']);
     item.file.archiveState = String(row['download_state']);
+  }
+  // The follow-up this file closed, if any (D-61): a line on this message,
+  // never a message of its own. Only a live close by answers ('answers'),
+  // including of a follow-up the first run opened. A pair recorded silently
+  // ('answered_on_arrival') closes nothing anyone saw open.
+  const closes = await db.read({
+    sql: `SELECT f.closed_by_file_id, f.category, f.number, c.module_code
+            FROM followups f JOIN courses c ON c.context_id = f.context_id
+           WHERE f.closed_by_file_id IN (${ids.map(() => '?').join(', ')}) AND f.close_reason = 'answers'`,
+    args: ids,
+  });
+  const closing = new Map(closes.rows.map((r) => [String(r['closed_by_file_id']), `${String(r['module_code'])} ${followupLabel(String(r['category']) as FollowupCategory, String(r['number']))}`]));
+  for (const item of payload.items) {
+    const label = item.itemId === undefined ? undefined : closing.get(item.itemId);
+    if (label !== undefined && item.file !== undefined) item.file.closes = label;
   }
 }
 

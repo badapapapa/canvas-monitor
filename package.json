@@ -27,7 +27,9 @@
     "backfill-course": "node src/cli/index.ts backfill-course",
     "rules": "node src/cli/index.ts rules",
     "reroute": "node src/cli/index.ts reroute",
-    "mirror": "node src/cli/index.ts mirror"
+    "mirror": "node src/cli/index.ts mirror",
+    "tune-patterns": "node src/cli/index.ts tune-patterns",
+    "followups": "node src/cli/index.ts followups"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

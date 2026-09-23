@@ -198,6 +198,20 @@ about 200 days can be blocked and then deleted (DECISIONS.md D-53). When Azure
 for Students ends, accept the pay-as-you-go offer rather than letting it lapse.
 If it happens anyway, the `graph_app` alert says so.
 
+## Answer-sheet follow-ups (Phase 6)
+
+When a numbered tutorial or lab lands without its answers, it is tracked; when
+the answers arrive, their notification says `✅ closes <module> Tutorial 3`.
+One nudge after 10 days; everything still open closes at term end
+(DECISIONS.md D-61).
+
+| Command | What it does |
+|---|---|
+| `npm run tune-patterns` | Read-only: the words that mark answer files, ranked, with their pairs. |
+| `npm run followups -- preview` | Read-only: what would open, close, and be ignored. |
+| `npm run followups -- list [--all]` | Open follow-ups. |
+| `npm run followups -- dismiss <id>` | Close one by hand (answers only given in class). |
+
 ## The local mirror (optional, Mac only)
 
 Copies files archived **from now on** into your own module folders, under

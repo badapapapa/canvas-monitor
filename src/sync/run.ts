@@ -43,6 +43,7 @@ import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderIte
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
 import { runArchive, tallyFailures, type ArchiveOutcome } from '../archive/stage.ts';
+import { runFollowups, type FollowupOutcome } from '../followups/stage.ts';
 import { TokenProvider } from '../graph/auth.ts';
 import { GraphDrive } from '../graph/drive.ts';
 import { RequestGuard, SCOPES, type RootSpec } from '../graph/guard.ts';
@@ -106,6 +107,7 @@ export interface SyncOutcome {
   /** What this run decided to enqueue, for the --dry-run preview. */
   planned: Payload[];
   archive: ArchiveOutcome | null;
+  followups: FollowupOutcome | null;
 }
 
 export async function runSync(ctx: RunContext, options: SyncOptions = {}): Promise<SyncOutcome> {
@@ -303,7 +305,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
 }
 
 function empty(status: SyncOutcome['status']): SyncOutcome {
-  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null };
+  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null, followups: null };
 }
 
 function buildTelegram(config: Config, ctx: RunContext, options: SyncOptions): TelegramClient | null {
@@ -480,6 +482,12 @@ async function syncBody(
         now,
       });
     }
+  }
+
+  // --- follow-ups (Phase 6): after the archive, BEFORE the flush, so a close
+  // shows on the answer file's own notification in this run (D-61).
+  if (config.getBoolean('followups_enabled', false)) {
+    outcome.followups = await runFollowups(ctx, { config, canvas, now });
   }
 
   alerts.push(...(await staleContextAlerts(ctx, contexts, coverageNow, now)));

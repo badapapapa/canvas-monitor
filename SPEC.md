@@ -376,11 +376,14 @@ routing_rules (
   pattern TEXT, target_folder TEXT, priority INTEGER
 )
 
-followups (
-  id INTEGER PRIMARY KEY, file_id TEXT, context_id INTEGER,
-  group_key TEXT, folder TEXT,
-  state TEXT,                  -- awaiting | closed | escalated | dismissed
-  opened_at TEXT, escalated_at TEXT, closed_at TEXT, closed_by_file_id TEXT
+followups (                    -- As built: migrations/0010_followups.sql (D-61)
+  id INTEGER PRIMARY KEY, context_id INTEGER,
+  category TEXT, number TEXT,  -- the key, with context_id: UNIQUE
+  question_file_id TEXT,
+  state TEXT,                  -- open | closed | dismissed | expired
+  opened_at TEXT, recorded_at TEXT, baseline INTEGER, nudged_at TEXT,
+  closed_at TEXT, closed_by_file_id TEXT,
+  close_reason TEXT            -- answers | answered_on_arrival | dismissed | term_end
 )
 
 sync_lock (id INTEGER PRIMARY KEY CHECK (id=1), locked_at TEXT, holder TEXT)
@@ -580,6 +583,13 @@ PDF parsing must be wrapped in try/catch with a timeout and write
 ---
 
 ## 10. Answer-sheet follow-ups
+
+> **As built, with the owner's scope (DECISIONS.md D-61):** only files routed
+> into Tutorials or Labs whose name carries a tutorial or lab number take part;
+> the key is (context, category, normalised number); a close is a line on the
+> answer file's own notification, not a message; generic answer words are
+> `answer(s)`, `solution(s)`, `soln(s)` only; partial answers are an owner
+> ruling; filenames only, no PDF text. Where the text below differs, D-61 wins.
 
 When a file lands in `Tutorials` or `Labs` and does not match an answer pattern,
 open a `followups` row in state `awaiting`.

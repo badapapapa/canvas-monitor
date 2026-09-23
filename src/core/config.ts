@@ -109,6 +109,31 @@ export const CONFIG_SPEC = {
     pattern: /^[^"*:<>?/\\|]{1,60}$/,
     formatHint: 'a single folder name, no slashes',
   },
+  followups_enabled: {
+    secret: false,
+    description: 'Track answer-sheet follow-ups during sync (D-61). Off until the first-run preview is approved.',
+    default: 'false',
+    pattern: /^(true|false)$/,
+    formatHint: 'true or false',
+  },
+  followup_partial_answers: {
+    secret: false,
+    description: 'Owner ruling (D-61): does a partial answer file ("Part 1 - Solutions") close its follow-up? No default: follow-ups do not run until ruled.',
+    pattern: /^(close|keep_open)$/,
+    formatHint: 'close or keep_open',
+  },
+  followups_baselined_at: {
+    secret: false,
+    description: 'Written by sync: when the silent first follow-up run happened. Absent means the next run is the first.',
+    pattern: /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/,
+    formatHint: 'ISO-8601 UTC timestamp',
+  },
+  followups_term_checked_at: {
+    secret: false,
+    description: 'Written by sync: when term end dates were last read from Canvas (at most daily).',
+    pattern: /^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/,
+    formatHint: 'ISO-8601 UTC timestamp',
+  },
   archive_drive_ok_at: {
     secret: false,
     description: 'Written by sync: when the archive last reached OneDrive. Drives the graph_unreachable alert.',
