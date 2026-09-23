@@ -7,9 +7,9 @@
  *   node scripts/mirror-schedule.ts --install  # only once approved
  *   node scripts/mirror-schedule.ts --uninstall
  *
- * The plist runs node by its REAL path (Homebrew's /opt/homebrew/bin/node is a
- * symlink into a versioned Cellar folder). macOS ties a Full Disk Access grant
- * to that real path, so the grant and the schedule point at the same binary.
+ * The plist runs the mirror's OWN copy of node (var/runtime/bin/node, made by
+ * scripts/mirror-runtime.ts, D-59), so the macOS file-access grant belongs to
+ * that binary alone and survives `brew upgrade node`.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -20,7 +20,8 @@ import { fileURLToPath } from 'node:url';
 
 const LABEL = 'local.canvas-monitor.mirror';
 const repo = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const node = realpathSync(process.execPath);
+const runtimeNode = path.join(repo, 'var', 'runtime', 'bin', 'node');
+const node = existsSync(runtimeNode) ? runtimeNode : realpathSync(process.execPath);
 const plistPath = path.join(homedir(), 'Library', 'LaunchAgents', `${LABEL}.plist`);
 const logPath = path.join(repo, 'var', 'mirror', 'launchd.log');
 const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -48,7 +49,10 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
 
 const arg = process.argv[2];
 const domain = `gui/${userInfo().uid}`;
-if (arg === '--install') {
+if (arg === '--install' && node !== runtimeNode) {
+  process.stderr.write(`Refusing to install: the mirror's own node is missing.\nRun:  node scripts/mirror-runtime.ts\n`);
+  process.exit(2);
+} else if (arg === '--install') {
   mkdirSync(path.dirname(logPath), { recursive: true });
   mkdirSync(path.dirname(plistPath), { recursive: true });
   writeFileSync(plistPath, plist);
@@ -61,5 +65,5 @@ if (arg === '--install') {
   }
   process.stdout.write('Schedule removed.\n');
 } else {
-  process.stdout.write(`${plist}\n(printed only; nothing installed)\nnode binary to grant Full Disk Access: ${node}\n`);
+  process.stdout.write(`${plist}\n(printed only; nothing installed)\nbinary the grant belongs to: ${node}${node === runtimeNode ? '' : '  <-- run scripts/mirror-runtime.ts first'}\n`);
 }

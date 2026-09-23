@@ -38,12 +38,18 @@ export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; c
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     throw new AppError('usage', code === 'EPERM' || code === 'EACCES'
-      ? `macOS refused access to the OneDrive folder (${code}). Grant this node binary access: System Settings > Privacy & Security > Full Disk Access, add ${realpathSync(process.execPath)}. A Homebrew upgrade of node changes that path and needs the grant again (D-58).`
+      ? `macOS refused access to the OneDrive folder (${code}). The binary asking is ${realpathSync(process.execPath)}. ` +
+        'If a prompt appeared, allow it; otherwise System Settings > Privacy & Security > Files and Folders, and tick OneDrive for that binary. ' +
+        'Under launchd it should be the mirror\'s own node (var/runtime/bin/node): see scripts/mirror-runtime.ts (D-59).'
       : `archive folder not readable (${code ?? 'unknown'}; is OneDrive running?): ${roots.archiveRoot}`);
   }
   const guard = new MirrorGuard(roots);
 
-  const ctx = await startRun({ command: 'mirror', dryRun: true, recordRun: false });
+  // dry_run in the log means --dry-run, nothing else. The archive database is
+  // opened read-only whatever the flag says, so this command cannot write to
+  // it; that is logged as db_access: "read-only" (D-59). The mirror's own state
+  // file is not the archive, and is written on a real run.
+  const ctx = await startRun({ command: 'mirror', dryRun: opts.dryRun, recordRun: false, readOnlyDb: true });
   const rows = await ctx.db.read(
     `SELECT id, canvas_file_id, target_path, content_sha256 FROM files
       WHERE download_state = 'complete' AND target_path IS NOT NULL AND content_sha256 IS NOT NULL

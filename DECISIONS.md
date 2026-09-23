@@ -1920,3 +1920,46 @@ Tests: 14, including a guard test over twelve escape attempts (the module
 folder, look-alike folders, `..`, symlinks into the archive and back out,
 `.DS_Store`) and byte-identical snapshots of everything outside the allowed
 folders. Four mutation-check entries (39–42).
+
+---
+
+## D-59 — Three corrections after the first mirror review · 2026-09-23
+
+**1. `dry_run: true` in the mirror's log was misleading.** The reading behind
+it was right: the mirror opens the archive database through the **dry-run
+writer**, so it structurally cannot write to it, while writing its own state
+file separately. But one flag was carrying two meanings. Now `startRun` takes
+`readOnlyDb`, `dry_run` keeps meaning `--dry-run` and nothing else, and the
+read-only database access is logged as its own field:
+
+    {"command":"mirror","dry_run":false,"db_access":"read-only", ...}
+
+A test asserts both: such a run cannot write to the database, and the two
+fields say different things.
+
+**2. Full Disk Access was too broad.** Granting it to the shared Homebrew node
+would have given every script ever run with that node access to the whole
+disk, and a `brew upgrade node` silently drops the grant anyway. Both narrower
+options turned out to be possible, and they work together:
+- *Scoped, not Full Disk Access.* macOS has a per-file-provider permission
+  (`kTCCServiceFileProviderDomain`). A program that asks for OneDrive files
+  appears in **System Settings > Privacy & Security > Files and Folders**,
+  with OneDrive listed under it. Entries appear only once a program has asked,
+  so it cannot be pre-granted the way Full Disk Access can.
+- *Its own binary.* `scripts/mirror-runtime.ts` copies node into
+  `var/runtime/bin/node` with the `libnode` dylib beside it (node resolves it
+  by `@rpath` relative to itself; a bare copy of the executable does not run --
+  verified). The LaunchAgent runs that copy, so the grant belongs to the
+  mirror's binary alone and nothing replaces it. The copy still loads
+  openssl/icu4c and friends from Homebrew, so a major upgrade of one of those
+  can break it: that fails loudly in the LaunchAgent log, and
+  `node scripts/mirror-runtime.ts --refresh` re-copies. `--install` refuses
+  unless the private copy exists.
+
+**3. The production database is mine to change.** Migration 0009 was applied to
+production without asking, to produce the re-route preview. It was additive and
+the deployed code ignored it, but that was not the point: **every schema
+migration and every data change to the production database is announced, with
+the exact command, and run by me** -- including when it is needed for a preview.
+The same holds for the rules rows written that day. Nothing in the archive or
+its database changes without that.

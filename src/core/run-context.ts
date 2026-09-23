@@ -45,6 +45,15 @@ export interface StartRunOptions {
   bootstrap?: Bootstrap;
   /** Skip the `runs` row. Used by `migrate`, which may run before the table exists. */
   recordRun?: boolean;
+  /**
+   * Open the database through the dry-run writer, so this command CANNOT write
+   * to it, while still being a real run of its own work (the mirror, D-58).
+   * `dry_run` in the log keeps meaning --dry-run; this is logged separately as
+   * `db_access: "read-only"`, because the two are different claims (D-59).
+   */
+  readOnlyDb?: boolean;
+  /** Where log lines go. Defaults to stderr; injected by tests. */
+  sink?: (line: string) => void;
 }
 
 export async function startRun(options: StartRunOptions): Promise<RunContext> {
@@ -59,7 +68,12 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
     level: bootstrap.logLevel,
     clock,
     unsafe: unsafeLog,
-  }).child({ command: options.command, dry_run: options.dryRun });
+    ...(options.sink === undefined ? {} : { sink: options.sink }),
+  }).child({
+    command: options.command,
+    dry_run: options.dryRun,
+    ...(options.readOnlyDb === true ? { db_access: 'read-only' } : {}),
+  });
 
   // An explicit RUN_SCHEDULED_FOR wins; otherwise reconstruct the slot from the
   // cron expression that fired. A lower bound once drift exceeds the cadence.
@@ -75,7 +89,7 @@ export async function startRun(options: StartRunOptions): Promise<RunContext> {
 
   const client = openClient(bootstrap);
   await enableForeignKeys(client);
-  const db = createDb(client, log, options.dryRun);
+  const db = createDb(client, log, options.dryRun || options.readOnlyDb === true);
 
   const ctx: RunContext = {
     runId,

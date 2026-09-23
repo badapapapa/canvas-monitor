@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createClient, type Client } from '@libsql/client';
 import { createDb } from '../../src/core/db/writer.ts';
+import { startRun } from '../../src/core/run-context.ts';
 import { migrate, loadMigrations } from '../../src/core/db/migrate.ts';
 import { Config, setConfig } from '../../src/core/config.ts';
 import { silentLogger } from '../../src/core/log.ts';
@@ -122,6 +123,27 @@ describe('schema intent', () => {
         args: ['course', 1, 'probably_fine', clock.now().toISOString()],
       }),
     );
+    client.close();
+  });
+});
+
+describe('read-only database access (D-59)', () => {
+  it('a readOnlyDb run cannot write, whatever --dry-run says, and the log tells them apart', async () => {
+    const { client, dir } = await freshDb();
+    await migrate(client, silentLogger(), clock, { dryRun: false });
+    const lines: string[] = [];
+    const ctx = await startRun({
+      command: 'mirror', dryRun: false, recordRun: false, readOnlyDb: true, clock,
+      bootstrap: { databaseUrl: `file:${path.join(dir, 'test.db')}`, authToken: undefined, logLevel: 'info', ci: false, scheduledFor: undefined, cronSchedule: undefined, host: 'test' },
+      sink: (l: string) => lines.push(l),
+    });
+    await setConfig(ctx.db, clock, 'canvas_token', 'should-not-persist');
+    const stored = await client.execute('SELECT count(*) AS n FROM config');
+    assert.equal(Number(stored.rows[0]?.['n']), 0, 'a read-only run wrote to the archive database');
+    ctx.log.info('probe', {});
+    const fields = JSON.parse(lines.at(-1) ?? '{}') as Record<string, unknown>;
+    assert.equal(fields['db_access'], 'read-only');
+    assert.equal(fields['dry_run'], false, 'dry_run keeps meaning --dry-run');
     client.close();
   });
 });

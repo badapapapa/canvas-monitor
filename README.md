@@ -210,10 +210,16 @@ overwrites; writes nowhere else.
 3. `npm run mirror -- --baseline`: records everything currently archived as
    seen. Copies nothing.
 4. `npm run mirror -- --dry-run` again, any time, shows what the next run would do.
-5. Schedule: `node scripts/mirror-schedule.ts` prints the LaunchAgent;
-   `--install` loads it. If the log shows `EPERM`, grant the node binary it
-   names Full Disk Access (System Settings → Privacy & Security), and again
-   after `brew upgrade node`.
+5. `node scripts/mirror-runtime.ts` makes the mirror its own copy of node in
+   `var/runtime/bin/node`, so the macOS file grant belongs to that binary alone
+   and survives `brew upgrade node` (D-59).
+6. `node scripts/mirror-schedule.ts` prints the LaunchAgent; `--install` loads
+   it (every 20 minutes, and at login).
+7. **Permission:** the first scheduled run asks for OneDrive access. Allow it.
+   If no prompt appears and the log shows `EPERM`, open System Settings →
+   Privacy & Security → **Files and Folders**, find that node binary and tick
+   **OneDrive**. Full Disk Access is not needed. After a brew upgrade breaks
+   the copy, run `node scripts/mirror-runtime.ts --refresh`.
 
 ## Privacy posture
 
