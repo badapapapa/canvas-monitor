@@ -202,8 +202,9 @@ If it happens anyway, the `graph_app` alert says so.
 
 When a numbered tutorial or lab lands without its answers, it is tracked; when
 the answers arrive, their notification says `✅ closes <module> Tutorial 3`.
-One nudge after 10 days; everything still open closes at term end
-(DECISIONS.md D-61).
+On each lesson day at 07:00 SGT, one message lists what a lesson has already
+passed without answers. Everything still open closes at term end
+(DECISIONS.md D-61, D-62).
 
 | Command | What it does |
 |---|---|
@@ -211,6 +212,9 @@ One nudge after 10 days; everything still open closes at term end
 | `npm run followups -- preview` | Read-only: what would open, close, and be ignored. |
 | `npm run followups -- list [--all]` | Open follow-ups. |
 | `npm run followups -- dismiss <id>` | Close one by hand (answers only given in class). |
+| `npm run followups -- module off --module <code>` | Never track answers for that module. |
+| `npm run timetable -- list` | My lessons (personal: database only). `add`, `skip`, `remove`, `unskip`, `import`. |
+| `npm run followups -- preview --draft <file> --reminder-date <date>` | Read-only: a draft timetable's effect, and one morning's reminder. |
 
 ## The local mirror (optional, Mac only)
 

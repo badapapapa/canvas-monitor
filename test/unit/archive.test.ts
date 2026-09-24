@@ -589,14 +589,14 @@ describe('Phase 5: re-route after an approved preview (D-57)', () => {
 });
 
 describe('Phase 6: follow-ups through a whole sync (D-61)', () => {
-  const followupMessages = (h: H) => content(h).filter((t) => /Answer follow-ups|Answers still not posted/.test(t));
+  const followupMessages = (h: H) => content(h).filter((t) => /Answer follow-ups/.test(t));
   async function enable(h: H) {
     await setConfig(h.db, h.clock, 'followups_enabled', 'true');
     await setConfig(h.db, h.clock, 'followup_partial_answers', 'keep_open');
   }
   const rows = async (h: H) =>
-    (await h.client.execute('SELECT category, number, state, close_reason, baseline, nudged_at FROM followups ORDER BY number')).rows.map((r) =>
-      [r['number'], r['state'], r['close_reason'], Number(r['baseline']), r['nudged_at'] === null ? 'not nudged' : 'nudged']);
+    (await h.client.execute('SELECT category, number, state, close_reason, baseline FROM followups ORDER BY number')).rows.map((r) =>
+      [r['number'], r['state'], r['close_reason'], Number(r['baseline'])]);
 
   it('first run: records everything silently and sends ONE summary', async () => {
     const h = await harness();
@@ -609,9 +609,9 @@ describe('Phase 6: follow-ups through a whole sync (D-61)', () => {
     );
     await h.sync();
     assert.deepEqual(followupMessages(h).length, 1, content(h).join('\n---\n'));
-    assert.match(followupMessages(h)[0]!, /Tracking 1: AB1234 Lab 4 awaiting answers\./);
+    assert.match(followupMessages(h)[0]!, /Tracking 1 awaiting answers: AB1234 Lab 4, posted 18 Sep \(0 days\)\./);
     assert.doesNotMatch(content(h).join('\n'), /closes/, 'a pair recorded on the first run closes nothing anyone saw open');
-    assert.deepEqual(await rows(h), [['3', 'closed', 'answered_on_arrival', 1, 'not nudged'], ['4', 'open', null, 1, 'not nudged']]);
+    assert.deepEqual(await rows(h), [['3', 'closed', 'answered_on_arrival', 1], ['4', 'open', null, 1]]);
   });
 
   it('closes on the answer file\'s own notification, with no separate message', async () => {
@@ -638,32 +638,88 @@ describe('Phase 6: follow-ups through a whole sync (D-61)', () => {
     assert.deepEqual((await rows(h)).map((r) => [r[0], r[1], r[2]]), [['7', 'closed', 'answered_on_arrival']]);
   });
 
-  it('nudges once after 10 days, and never again', async () => {
+  // Invented timetable: this module has a lab on Mondays at 09:00 SGT. The
+  // harness files are posted Fri 18 Sep 2026, 20:03 SGT.
+  async function mondayLabs(h: H) {
+    await h.client.execute(`INSERT INTO lesson_slots (context_id, weekday, start_time, first_date, last_date, label, created_at)
+                            VALUES (1, 1, '09:00', '2026-09-01', '2026-12-31', 'lab', '2026-09-01T00:00:00Z')`);
+  }
+  const reminders = (h: H) => content(h).filter((t) => /Answers still outstanding/.test(t));
+  const at = (h: H, sgt: string) => h.clock.set(new Date(Date.parse(`${sgt}+08:00`)).toISOString());
+
+  it('reminds on a lesson day at 07:00, only once a lesson has passed since posting, once a day, until answered', async () => {
     const h = await harness();
     await enable(h);
-    await h.sync(); // first run, nothing open
-    h.files.push({ id: 36, name: 'Lab 05.pdf', size: 100, folder: 8 });
+    await mondayLabs(h);
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
+    await h.sync(); // first run, Fri 18 Sep: Lab 4 opens
+    at(h, '2026-09-21T07:10:00'); // Monday: the last lab (14 Sep) was BEFORE it was posted
     await h.sync();
-    h.clock.set('2026-09-28T12:30:00Z');
+    assert.equal(reminders(h).length, 0, 'not overdue yet');
+    at(h, '2026-09-22T07:10:00'); // Tuesday: no lesson
     await h.sync();
-    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 1);
-    assert.match(content(h).join('\n'), /AB1234 Lab 5: no answers after 10 days/);
-    h.clock.set('2026-10-05T12:30:00Z');
+    assert.equal(reminders(h).length, 0);
+    at(h, '2026-09-28T06:40:00'); // Monday, before 07:00
     await h.sync();
-    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 1, 'never repeated');
+    assert.equal(reminders(h).length, 0);
+    at(h, '2026-09-28T07:10:00'); // the 21 Sep lab has passed since posting
+    await h.sync();
+    at(h, '2026-09-28T09:30:00');
+    await h.sync();
+    assert.equal(reminders(h).length, 1, 'once that day, whatever the number of runs');
+    assert.match(reminders(h)[0]!, /AB1234 lab 09:00 today: Lab 4, posted 18 Sep \(9 days\)/);
+    at(h, '2026-10-05T07:10:00'); // the next lab day: it repeats
+    await h.sync();
+    assert.equal(reminders(h).length, 2);
+    h.files.push({ id: 35, name: 'Lab 04 - Suggested Solutions.pdf', size: 100, folder: 8 });
+    at(h, '2026-10-07T12:00:00');
+    await h.sync();
+    at(h, '2026-10-12T07:10:00');
+    await h.sync();
+    assert.equal(reminders(h).length, 2, 'never for an answered item');
   });
 
-  it('shows the age of a baseline follow-up past 10 days in the summary, and never nudges it', async () => {
+  it('never reminds about a dismissed item', async () => {
     const h = await harness();
-    h.files.push({ id: 37, name: 'Lab 06.pdf', size: 100, folder: 8 });
-    await h.sync(); // follow-ups not on yet: the file is only seen
-    h.clock.set('2026-09-30T13:00:00Z');
     await enable(h);
-    await h.sync(); // the first follow-up run, 12 days after the question
-    assert.match(followupMessages(h).join('\n'), /Tracking 1: AB1234 Lab 6 \(Lab 6: 12 days\) awaiting answers\./);
-    h.clock.set('2026-10-03T13:00:00Z');
+    await mondayLabs(h);
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
     await h.sync();
-    assert.equal(content(h).filter((t) => /Answers still not posted/.test(t)).length, 0);
+    await h.client.execute("UPDATE followups SET state = 'dismissed', close_reason = 'dismissed', closed_at = '2026-09-20T00:00:00Z'");
+    at(h, '2026-09-28T07:10:00');
+    await h.sync();
+    assert.equal(reminders(h).length, 0);
+  });
+
+  it('the first run sends its summary and no reminder, even on a lesson day with overdue items', async () => {
+    const h = await harness();
+    await mondayLabs(h);
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
+    await h.sync(); // follow-ups not on yet
+    at(h, '2026-09-28T08:00:00'); // Monday, after 07:00, and the 21 Sep lab has passed
+    await enable(h);
+    await h.sync(); // the first run
+    at(h, '2026-09-28T09:30:00');
+    await h.sync(); // same morning: went live after 07:00, so nothing
+    assert.deepEqual([followupMessages(h).length, reminders(h).length], [1, 0]);
+    assert.match(followupMessages(h)[0]!, /Tracking 1 awaiting answers: AB1234 Lab 4, posted 18 Sep \(9 days\)\./);
+    at(h, '2026-10-05T07:10:00');
+    await h.sync();
+    assert.equal(reminders(h).length, 1, 'from the next lesson day on');
+  });
+
+  it('a module with tracking switched off opens nothing and is never reminded about', async () => {
+    const h = await harness();
+    await enable(h);
+    await mondayLabs(h);
+    await h.client.execute('UPDATE courses SET followups_tracking = 0 WHERE context_id = 1');
+    h.files.push({ id: 33, name: 'Lab 04.pdf', size: 100, folder: 8 });
+    await h.sync();
+    at(h, '2026-09-28T07:10:00');
+    await h.sync();
+    assert.deepEqual(await rows(h), []);
+    assert.match(followupMessages(h).join('\n'), /Tracking 0/);
+    assert.equal(reminders(h).length, 0);
   });
 
   it('does nothing at all until the partial-answer ruling is set', async () => {

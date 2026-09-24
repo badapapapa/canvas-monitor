@@ -74,7 +74,7 @@ function followupLine(o: SyncOutcome): string | null {
     f.baseline ? 'first run' : null,
     f.opened > 0 ? `${f.opened} opened` : null,
     f.closed > 0 ? `${f.closed} closed` : null,
-    f.nudged > 0 ? `${f.nudged} nudged` : null,
+    f.reminded !== null ? `lesson reminder for ${f.reminded}` : null,
     f.expired > 0 ? `${f.expired} expired` : null,
   ].filter((b) => b !== null);
   return bits.length === 0 ? null : `Follow-ups: ${bits.join(', ')}`;

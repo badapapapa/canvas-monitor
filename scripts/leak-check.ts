@@ -12,7 +12,13 @@
  *   courses.seed.json   module codes, Canvas course and group ids, course and
  *                       group names, my canvas_user_id    (gitignored)
  *   the database        titles of every stored announcement, assignment and
- *                       file, when .env is present          (never committed)
+ *                       file, when .env is present          (never committed);
+ *                       plus every SHORT file name (under 16 characters),
+ *                       matched only as a whole file name -- "src.zip" in a
+ *                       path or quotes, never inside "mysrc.zip" -- minus the
+ *                       generic ones listed in leak-check.allow (gitignored:
+ *                       one name per line, since listing real names in the
+ *                       repo would itself be the leak)
  *
  * and searched for in every tracked file, every object in git history, and
  * every commit message. Nothing identifying is printed except the hits
@@ -43,6 +49,8 @@ interface Needle {
   text: string;
   /** Match on word boundaries (ids and codes), not as a raw substring. */
   word: boolean;
+  /** Match only as a whole file name: no letter, digit, '.', '-' or '_' either side. */
+  filename?: boolean;
 }
 
 const needles = new Map<string, Needle>();
@@ -79,7 +87,13 @@ for (const c of seed.contexts) {
 
 // --- from the database, when available ---------------------------------------
 let titles = 0;
+let shortNames = 0;
+let allowedNames = 0;
 let dbNote = 'database not checked (no .env)';
+const ALLOW_FILE = path.join(ROOT, 'leak-check.allow');
+const allowList = new Set(
+  existsSync(ALLOW_FILE) ? readFileSync(ALLOW_FILE, 'utf8').split('\n').map((l) => l.trim()).filter((l) => l !== '' && !l.startsWith('#')) : [],
+);
 try {
   process.loadEnvFile(path.join(ROOT, '.env'));
 } catch {
@@ -99,7 +113,19 @@ if (process.env['TURSO_DATABASE_URL'] !== undefined) {
       add('item title', String(r['title']), false, 16);
       if (needles.size > before) titles += 1;
     }
-    dbNote = `${titles} distinct titles of 16+ characters from the database`;
+    // Short FILE names: generic ones are allowed by name; the rest must never appear as a file name.
+    const short = await db.execute("SELECT DISTINCT title FROM items WHERE resource_type = 'file' AND title IS NOT NULL AND length(title) < 16");
+    for (const r of short.rows) {
+      const t = String(r['title']).trim();
+      if (t.length < 3 || !/\.[A-Za-z0-9]{1,8}$/.test(t) || needles.has(t)) continue;
+      if (allowList.has(t)) {
+        allowedNames += 1;
+        continue;
+      }
+      needles.set(t, { kind: 'short file name', text: t, word: false, filename: true });
+      shortNames += 1;
+    }
+    dbNote = `${titles} distinct titles of 16+ characters, and ${shortNames} short file names (${allowedNames} allowed as generic by leak-check.allow), from the database`;
   } catch (error) {
     dbNote = `database not checked: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
@@ -113,7 +139,10 @@ for (const t of ['2610', '2520', '2026', '2025', '2027']) needles.delete(t);
 const escape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const patterns = [...needles.values()].map((n) => ({
   ...n,
-  re: new RegExp(n.word ? `(?<![A-Za-z0-9])${escape(n.text)}(?![A-Za-z0-9])` : escape(n.text)),
+  re: new RegExp(
+    n.filename === true ? `(?<![A-Za-z0-9._-])${escape(n.text)}(?![A-Za-z0-9._-])`
+      : n.word ? `(?<![A-Za-z0-9])${escape(n.text)}(?![A-Za-z0-9])` : escape(n.text),
+  ),
 }));
 
 // The one deliberate exception: SPEC.md's notification mock-up, as I wrote it.

@@ -29,7 +29,8 @@
     "reroute": "node src/cli/index.ts reroute",
     "mirror": "node src/cli/index.ts mirror",
     "tune-patterns": "node src/cli/index.ts tune-patterns",
-    "followups": "node src/cli/index.ts followups"
+    "followups": "node src/cli/index.ts followups",
+    "timetable": "node src/cli/index.ts timetable"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

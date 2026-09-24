@@ -15,8 +15,6 @@
 
 import { classify, followupLabel, FOLLOWUP_CATEGORIES, type FollowupCategory } from './classify.ts';
 
-export const NUDGE_AFTER_MS = 10 * 24 * 3600_000;
-
 export type PartialPolicy = 'close' | 'keep_open' | null;
 
 export interface TrackedFile {
@@ -27,7 +25,12 @@ export interface TrackedFile {
   category: string;
   title: string;
   firstSeenAt: string;
+  /** Canvas's own upload time. Ages and "overdue" run from this (D-62). */
+  postedAt: string | null;
 }
+
+/** When the question was posted, falling back to when the monitor first saw it. */
+export const postedOf = (f: TrackedFile): string => f.postedAt ?? f.firstSeenAt;
 
 export interface ExistingFollowup {
   id: number;
@@ -36,7 +39,6 @@ export interface ExistingFollowup {
   number: string;
   state: 'open' | 'closed' | 'dismissed' | 'expired';
   openedAt: string;
-  nudgedAt: string | null;
 }
 
 export interface PlanInput {
@@ -46,8 +48,8 @@ export interface PlanInput {
   partialPolicy: PartialPolicy;
   termEnds: ReadonlyMap<number, string | null>;
   now: Date;
-  /** The silent first run: nothing is announced, nothing is nudged. */
-  baseline: boolean;
+  /** Contexts whose answer tracking is switched off: they take no part at all. */
+  trackingOff?: ReadonlySet<number>;
 }
 
 export interface Key {
@@ -60,12 +62,11 @@ export interface Key {
 
 export interface Plan {
   /** New follow-ups: a numbered question with no answers yet. */
-  opens: Array<Key & { question: TrackedFile; ageDays: number; pastNudge: boolean }>;
+  opens: Array<Key & { question: TrackedFile; postedAt: string; ageDays: number }>;
   /** New rows recorded closed at once: answers were already there. */
   closedOnArrival: Array<Key & { question: TrackedFile; answer: TrackedFile }>;
   /** Open follow-ups the earliest matching answer now closes. */
   closes: Array<Key & { followupId: number; answer: TrackedFile }>;
-  nudges: Array<Key & { followupId: number; ageDays: number }>;
   expires: Array<Key & { followupId: number }>;
   /** Files in Tutorials or Labs that deliberately take no part. */
   ignored: Array<{ file: TrackedFile; reason: string }>;
@@ -74,18 +75,25 @@ export interface Plan {
   answersWithoutQuestion: Array<Key & { file: TrackedFile }>;
   /** Further answer files for a key already answered: they do nothing. */
   extraAnswers: Array<Key & { file: TrackedFile }>;
+  /** Files in modules with tracking off (listed by the preview only). */
+  trackingOff: TrackedFile[];
 }
 
+// Order by when the monitor saw them: that is the order the runs processed them in.
 const order = (a: TrackedFile, b: TrackedFile) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.itemId.localeCompare(b.itemId);
 const days = (ms: number) => Math.floor(ms / (24 * 3600_000));
 
 export function planFollowups(input: PlanInput): Plan {
-  const plan: Plan = { opens: [], closedOnArrival: [], closes: [], nudges: [], expires: [], ignored: [], partial: [], answersWithoutQuestion: [], extraAnswers: [] };
+  const plan: Plan = { opens: [], closedOnArrival: [], closes: [], expires: [], ignored: [], partial: [], answersWithoutQuestion: [], extraAnswers: [], trackingOff: [] };
   const groups = new Map<string, { key: Key; questions: TrackedFile[]; answers: TrackedFile[] }>();
   const now = input.now.getTime();
 
   for (const file of input.files) {
     if (!FOLLOWUP_CATEGORIES.has(file.category)) continue;
+    if (input.trackingOff?.has(file.contextId) === true) {
+      plan.trackingOff.push(file);
+      continue;
+    }
     const category = file.category as FollowupCategory;
     const c = classify(file.title, category, input.phrases.get(file.contextId) ?? []);
     if (c.role === 'ignored') {
@@ -131,8 +139,8 @@ export function planFollowups(input: PlanInput): Plan {
         plan.ignored.push({ file: question, reason: 'arrived after term end' });
         continue;
       }
-      const age = now - new Date(question.firstSeenAt).getTime();
-      plan.opens.push({ ...key, question, ageDays: days(age), pastNudge: age >= NUDGE_AFTER_MS });
+      const postedAt = postedOf(question);
+      plan.opens.push({ ...key, question, postedAt, ageDays: days(now - new Date(postedAt).getTime()) });
       continue;
     }
 
@@ -145,34 +153,46 @@ export function planFollowups(input: PlanInput): Plan {
       for (const extra of answers.slice(1)) plan.extraAnswers.push({ ...key, file: extra });
       continue;
     }
-    if (termOver) {
-      plan.expires.push({ ...key, followupId: row.id });
-      continue;
-    }
-    const age = now - new Date(row.openedAt).getTime();
-    if (!input.baseline && row.nudgedAt === null && age >= NUDGE_AFTER_MS) {
-      plan.nudges.push({ ...key, followupId: row.id, ageDays: days(age) });
-    }
+    if (termOver) plan.expires.push({ ...key, followupId: row.id });
   }
   return plan;
 }
 
-/** "BT0000 Tutorials 3, 4 and 5" -- one phrase per module and category. */
-export function describeOpen(opens: ReadonlyArray<Key & { ageDays: number; pastNudge: boolean }>): string[] {
-  const byGroup = new Map<string, Array<Key & { ageDays: number; pastNudge: boolean }>>();
-  for (const o of opens) {
-    const g = `${o.moduleCode}|${o.category}`;
-    byGroup.set(g, [...(byGroup.get(g) ?? []), o]);
-  }
+// "5 Aug", in SGT. By hand, not Intl: locale data differs between machines ("Sep" vs "Sept").
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const shortDate = {
+  format(d: Date): string {
+    const sgt = new Date(d.getTime() + 8 * 3600_000);
+    return `${sgt.getUTCDate()} ${MONTHS[sgt.getUTCMonth()]!}`;
+  },
+};
+
+export interface Describable {
+  moduleCode: string;
+  category: FollowupCategory;
+  number: string;
+  postedAt: string;
+}
+
+/**
+ * "AB1234 Tutorials 3, 4 and 5, posted 5 Aug (50 days)" -- one phrase per
+ * module and category, with each item's real age from its posted date.
+ */
+export function describeItems(items: readonly Describable[], now: Date, opts: { withModule?: boolean } = {}): string[] {
+  const byGroup = new Map<string, Describable[]>();
+  for (const o of items) byGroup.set(`${o.moduleCode}|${o.category}`, [...(byGroup.get(`${o.moduleCode}|${o.category}`) ?? []), o]);
+  const age = (iso: string) => `posted ${shortDate.format(new Date(iso))} (${days(now.getTime() - new Date(iso).getTime())} days)`;
+  const list = (xs: string[]) => (xs.length === 1 ? xs[0]! : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)!}`);
   const phrases: string[] = [];
   for (const group of byGroup.values()) {
     group.sort((a, b) => Number(a.number) - Number(b.number));
     const first = group[0]!;
     const noun = first.category === 'Tutorials' ? 'Tutorial' : 'Lab';
-    const nums = group.map((g) => g.number);
-    const list = nums.length === 1 ? nums[0]! : `${nums.slice(0, -1).join(', ')} and ${nums.at(-1)!}`;
-    const aged = group.filter((g) => g.pastNudge).map((g) => `${noun} ${g.number}: ${g.ageDays} days`);
-    phrases.push(`${first.moduleCode} ${noun}${nums.length === 1 ? '' : 's'} ${list}${aged.length > 0 ? ` (${aged.join(', ')})` : ''}`);
+    const plural = `${opts.withModule === false ? '' : `${first.moduleCode} `}${group.length === 1 ? noun : `${noun}s`}`;
+    const sameDay = new Set(group.map((g) => shortDate.format(new Date(g.postedAt)))).size === 1;
+    phrases.push(sameDay
+      ? `${plural} ${list(group.map((g) => g.number))}, ${age(first.postedAt)}`
+      : `${plural} ${list(group.map((g) => `${g.number}, ${age(g.postedAt)}`))}`);
   }
   return phrases;
 }

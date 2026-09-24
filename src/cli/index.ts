@@ -31,6 +31,7 @@ import { runGraphLogin } from './graph-login.ts';
 import { runReroute, runRules } from './reroute.ts';
 import { runMirrorCli } from './mirror.ts';
 import { runFollowupsCli, runTunePatterns } from './followups.ts';
+import { runTimetableCli } from './timetable.ts';
 import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
@@ -57,6 +58,12 @@ Commands:
   followups list [--all]   Open follow-ups (--all: every state).
   followups dismiss <id>   Close one by hand ("answers were only given in class").
   followups phrases [add]  Module-specific answer phrases: add --module <code> --phrase "<words>".
+  followups module off|on --module <code>   Answer tracking for a whole module (D-62).
+  followups preview [--draft <file>] [--reminder-date YYYY-MM-DD]
+  timetable [list]         My lessons, for lesson-day reminders (D-62). Personal: database only.
+  timetable add --module <code> --weekday thu --time 09:00 --from YYYY-MM-DD --to YYYY-MM-DD [--label lab]
+  timetable skip (--module <code> | --all) --date YYYY-MM-DD [--note "..."]
+  timetable remove <id> | unskip <id> | import <draft.json>
   reroute --preview        Show where each _unsorted file would move. Moves nothing.
   reroute --apply <fp>     Move exactly the previewed plan, once per file (D-40, D-57).
   set-config <key>         Set a config value, read from stdin (never argv).
@@ -105,6 +112,15 @@ async function main(argv: string[]): Promise<number> {
         baseline: { type: 'boolean', default: false },
         config: { type: 'string' },
         phrase: { type: 'string' },
+        draft: { type: 'string' },
+        'reminder-date': { type: 'string' },
+        weekday: { type: 'string' },
+        time: { type: 'string' },
+        from: { type: 'string' },
+        to: { type: 'string' },
+        label: { type: 'string' },
+        date: { type: 'string' },
+        note: { type: 'string' },
         all: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
@@ -156,9 +172,19 @@ async function main(argv: string[]): Promise<number> {
       return await withReadOnlyRun('tune-patterns', unsafeLog, (ctx) => runTunePatterns(ctx));
     case 'followups':
       return positionals[1] === 'preview' || positionals[1] === undefined
-        ? await withReadOnlyRun('followups-preview', unsafeLog, (ctx) => runFollowupsCli(ctx, { action: 'preview', rest: [] }))
+        ? await withReadOnlyRun('followups-preview', unsafeLog, (ctx) => runFollowupsCli(ctx, {
+            action: 'preview', rest: [],
+            ...(values.draft === undefined ? {} : { draft: values.draft }),
+            ...(values['reminder-date'] === undefined ? {} : { reminderDate: values['reminder-date'] }),
+          }))
         : await withRun('followups', dryRun, unsafeLog, async (ctx) =>
             runFollowupsCli(ctx, { action: positionals[1], rest: [...positionals.slice(2), ...(values.all === true ? ['--all'] : [])], ...(values.module === undefined ? {} : { module: values.module }), ...(values.phrase === undefined ? {} : { phrase: values.phrase }) }));
+    case 'timetable':
+      return await withRun('timetable', dryRun, unsafeLog, async (ctx) => runTimetableCli(ctx, {
+        action: positionals[1], rest: positionals.slice(2), all: values.all === true,
+        ...Object.fromEntries((['module', 'weekday', 'time', 'from', 'to', 'label', 'date', 'note'] as const)
+          .filter((k) => values[k] !== undefined).map((k) => [k, values[k] as string])),
+      }));
     case 'rules':
       return await withRun('rules', dryRun, unsafeLog, async (ctx) =>
         runRules(ctx, { action: positionals[1], rest: positionals.slice(2), opts: { module: values.module, field: values.field, pattern: values.pattern, target: values.target, priority: values.priority } }));

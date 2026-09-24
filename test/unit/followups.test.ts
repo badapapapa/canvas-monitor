@@ -6,7 +6,8 @@
 import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { classify, extractNumber, isAnswerName, tokensOf } from '../../src/followups/classify.ts';
-import { describeOpen, planFollowups, type ExistingFollowup, type PlanInput, type TrackedFile } from '../../src/followups/plan.ts';
+import { describeItems, planFollowups, type ExistingFollowup, type PlanInput, type TrackedFile } from '../../src/followups/plan.ts';
+import { lastLessonBefore, lessonsOn, planReminder, sgtInstant, type OpenItem, type Timetable } from '../../src/followups/timetable.ts';
 import { tunePatterns } from '../../src/followups/tune.ts';
 
 describe('answer detection: whole words only', () => {
@@ -63,18 +64,23 @@ describe('which files take part: a category number or nothing', () => {
 // --- the planner ---------------------------------------------------------------
 
 let seq = 0;
-const file = (title: string, firstSeenAt: string, category = 'Tutorials', contextId = 1): TrackedFile =>
-  ({ itemId: `i${(seq += 1)}`, contextId, moduleCode: contextId === 1 ? 'AB1234' : 'CD5678', category, title, firstSeenAt });
+const file = (title: string, firstSeenAt: string, category = 'Tutorials', contextId = 1, postedAt: string | null = null): TrackedFile =>
+  ({ itemId: `i${(seq += 1)}`, contextId, moduleCode: contextId === 1 ? 'AB1234' : 'CD5678', category, title, firstSeenAt, postedAt });
 const NOW = new Date('2026-10-20T12:00:00Z');
 const input = (files: TrackedFile[], over: Partial<PlanInput> = {}): PlanInput =>
-  ({ files, existing: [], phrases: new Map(), partialPolicy: 'keep_open', termEnds: new Map([[1, '2027-01-09T15:59:00Z']]), now: NOW, baseline: false, ...over });
+  ({ files, existing: [], phrases: new Map(), partialPolicy: 'keep_open', termEnds: new Map([[1, '2027-01-09T15:59:00Z']]), now: NOW, ...over });
 const open = (id: number, number: string, openedAt: string, over: Partial<ExistingFollowup> = {}): ExistingFollowup =>
-  ({ id, contextId: 1, category: 'Tutorials', number, state: 'open', openedAt, nudgedAt: null, ...over });
+  ({ id, contextId: 1, category: 'Tutorials', number, state: 'open', openedAt, ...over });
 
 describe('pairing on (context, category, number)', () => {
-  it('opens a follow-up for a numbered question with no answers', () => {
-    const p = planFollowups(input([file('AB1234-T3.pdf', '2026-10-18T00:00:00Z')]));
-    assert.deepEqual(p.opens.map((o) => [o.label, o.ageDays, o.pastNudge]), [['Tutorial 3', 2, false]]);
+  it('opens a follow-up for a numbered question with no answers, aged from its Canvas posted date', () => {
+    const p = planFollowups(input([file('AB1234-T3.pdf', '2026-10-18T00:00:00Z', 'Tutorials', 1, '2026-08-05T02:00:00Z'), file('AB1234-T4.pdf', '2026-10-18T00:00:00Z')]));
+    assert.deepEqual(p.opens.map((o) => [o.label, o.postedAt, o.ageDays]), [['Tutorial 3', '2026-08-05T02:00:00Z', 76], ['Tutorial 4', '2026-10-18T00:00:00Z', 2]]);
+  });
+
+  it('ignores a module whose tracking is switched off, entirely', () => {
+    const p = planFollowups(input([file('Tutorial 1.pdf', '2026-10-01T00:00:00Z', 'Tutorials', 2)], { trackingOff: new Set([2]) }));
+    assert.deepEqual([p.opens.length, p.ignored.length, p.trackingOff.map((f) => f.title)], [0, 0, ['Tutorial 1.pdf']]);
   });
 
   it('opens nothing when the answers came first, or in the same run', () => {
@@ -133,18 +139,7 @@ describe('the partial-answer case is the owner\'s ruling', () => {
   });
 });
 
-describe('lifecycle: one nudge at 10 days, expiry at term end', () => {
-  it('nudges once, at 10 days, never before and never again', () => {
-    const q = [file('T5.pdf', '2026-10-05T00:00:00Z')];
-    assert.equal(planFollowups(input(q, { existing: [open(5, '5', '2026-10-11T00:00:00Z')] })).nudges.length, 0, '9 days');
-    assert.equal(planFollowups(input(q, { existing: [open(5, '5', '2026-10-10T00:00:00Z')] })).nudges.length, 1, '10 days');
-    assert.equal(planFollowups(input(q, { existing: [open(5, '5', '2026-10-01T00:00:00Z', { nudgedAt: '2026-10-11T00:00:00Z' })] })).nudges.length, 0, 'already nudged');
-  });
-
-  it('sends no nudge at all during the first run', () => {
-    assert.equal(planFollowups(input([file('T5.pdf', '2026-09-01T00:00:00Z')], { baseline: true, existing: [open(5, '5', '2026-09-01T00:00:00Z')] })).nudges.length, 0);
-  });
-
+describe('lifecycle: expiry at term end', () => {
   it('expires what is still open at term end, and opens nothing after it', () => {
     const after = new Date('2027-01-10T00:00:00Z');
     const p = planFollowups(input([file('T5.pdf', '2026-10-01T00:00:00Z'), file('T6.pdf', '2027-01-09T20:00:00Z')], { now: after, existing: [open(5, '5', '2026-10-01T00:00:00Z')] }));
@@ -152,13 +147,78 @@ describe('lifecycle: one nudge at 10 days, expiry at term end', () => {
   });
 });
 
-describe('the first-run summary', () => {
-  it('reads "AB1234 Tutorials 3, 4 and 5", with the age of anything past 10 days', () => {
-    const p = planFollowups(input(
-      [file('T3.pdf', '2026-10-05T00:00:00Z'), file('T4.pdf', '2026-10-12T00:00:00Z'), file('T5.pdf', '2026-10-19T00:00:00Z'), file('Lab 2.pdf', '2026-10-19T00:00:00Z', 'Labs')],
-      { baseline: true },
-    ));
-    assert.deepEqual(describeOpen(p.opens), ['AB1234 Tutorials 3, 4 and 5 (Tutorial 3: 15 days)', 'AB1234 Lab 2']);
+describe('describing open items with their real age', () => {
+  it('groups by module and category, with each posted date and age', () => {
+    const at = (n: string, cat: 'Tutorials' | 'Labs', postedAt: string) => ({ moduleCode: 'AB1234', category: cat, number: n, postedAt });
+    assert.deepEqual(describeItems([at('5', 'Tutorials', '2026-08-05T02:00:00Z'), at('3', 'Tutorials', '2026-08-05T02:00:00Z'), at('4', 'Tutorials', '2026-08-05T02:00:00Z'), at('4', 'Labs', '2026-10-14T02:00:00Z')], NOW), [
+      'AB1234 Tutorials 3, 4 and 5, posted 5 Aug (76 days)',
+      'AB1234 Lab 4, posted 14 Oct (6 days)',
+    ]);
+    assert.deepEqual(describeItems([at('1', 'Labs', '2026-10-01T02:00:00Z'), at('2', 'Labs', '2026-10-08T02:00:00Z')], NOW, { withModule: false }), [
+      'Labs 1, posted 1 Oct (19 days) and 2, posted 8 Oct (12 days)',
+    ]);
+  });
+});
+
+// --- lesson-day reminders (D-62) --------------------------------------------------
+
+// Invented timetable: module 1 Thursdays 09:00, module 2 Thursdays 12:00, 2026-08-13 .. 2026-11-12.
+const TT: Timetable = {
+  slots: [
+    { contextId: 1, weekday: 4, startTime: '09:00', firstDate: '2026-08-13', lastDate: '2026-11-12', label: 'lab' },
+    { contextId: 2, weekday: 4, startTime: '12:00', firstDate: '2026-08-13', lastDate: '2026-11-12', label: 'lab' },
+  ],
+  exceptions: [{ contextId: null, date: '2026-09-24' }, { contextId: 2, date: '2026-10-08' }],
+};
+const item = (id: number, contextId: number, number: string, openedAt: string): OpenItem =>
+  ({ followupId: id, contextId, moduleCode: contextId === 1 ? 'AB1234' : 'CD5678', category: 'Labs', number, openedAt });
+const at7 = (date: string) => sgtInstant(date, '07:00');
+const LIVE = '2026-09-01T00:00:00Z';
+
+describe('the timetable', () => {
+  it('knows lesson days, and the days without one', () => {
+    assert.equal(lessonsOn(TT, 1, '2026-10-01').length, 1);
+    assert.equal(lessonsOn(TT, 1, '2026-09-30').length, 0, 'a Wednesday');
+    assert.equal(lessonsOn(TT, 1, '2026-09-24').length, 0, 'recess, for every module');
+    assert.deepEqual([lessonsOn(TT, 1, '2026-10-08').length, lessonsOn(TT, 2, '2026-10-08').length], [1, 0], 'one module\'s cancelled lab');
+    assert.equal(lessonsOn(TT, 1, '2026-11-19').length, 0, 'after the last lesson');
+  });
+
+  it('finds the last lesson strictly before a moment, skipping recess', () => {
+    assert.equal(lastLessonBefore(TT, 1, at7('2026-10-01'))?.toISOString(), '2026-09-17T01:00:00.000Z');
+    assert.equal(lastLessonBefore(TT, 1, sgtInstant('2026-10-01', '09:30'))?.toISOString(), '2026-10-01T01:00:00.000Z');
+  });
+});
+
+describe('the lesson-day reminder', () => {
+  it('lists, at 07:00, what a lesson has already passed since it was posted -- all modules in one', () => {
+    const d = planReminder({ now: at7('2026-10-01'), timetable: TT, liveSince: LIVE, open: [
+      item(1, 1, '3', '2026-09-10T01:00:00Z'), // a lab on 17 Sep has passed: overdue
+      item(2, 1, '4', '2026-09-18T01:00:00Z'), // posted after the last lesson (17 Sep): not yet
+      item(3, 2, '2', '2026-08-05T01:00:00Z'),
+    ] });
+    assert.ok(d.plan !== null);
+    assert.deepEqual(d.plan.modules.map((m) => [m.moduleCode, m.items.map((i) => i.number)]), [['AB1234', ['3']], ['CD5678', ['2']]]);
+  });
+
+  it('sends nothing before any lesson has passed since posting', () => {
+    const d = planReminder({ now: at7('2026-10-01'), timetable: TT, liveSince: LIVE, open: [item(2, 1, '4', '2026-09-18T01:00:00Z')] });
+    assert.deepEqual([d.plan, 'reason' in d ? d.reason : ''], [null, 'nothing is overdue']);
+  });
+
+  it('sends nothing on a day without a lesson: not a weekday lesson, not recess, not a cancelled lab', () => {
+    const open = [item(3, 2, '2', '2026-08-05T01:00:00Z')];
+    for (const date of ['2026-09-30', '2026-09-24', '2026-10-08']) {
+      const d = planReminder({ now: at7(date), timetable: TT, liveSince: LIVE, open });
+      assert.equal(d.plan, null, date);
+    }
+  });
+
+  it('sends nothing before 07:00, and nothing on the morning follow-ups went live after 07:00', () => {
+    const open = [item(3, 2, '2', '2026-08-05T01:00:00Z')];
+    assert.equal(planReminder({ now: sgtInstant('2026-10-01', '06:40'), timetable: TT, liveSince: LIVE, open }).plan, null);
+    assert.equal(planReminder({ now: sgtInstant('2026-10-01', '10:00'), timetable: TT, liveSince: sgtInstant('2026-10-01', '09:30').toISOString(), open }).plan, null);
+    assert.notEqual(planReminder({ now: sgtInstant('2026-10-01', '10:00'), timetable: TT, liveSince: LIVE, open }).plan, null, 'a late 07:00 run still sends');
   });
 });
 

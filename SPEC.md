@@ -590,6 +590,9 @@ PDF parsing must be wrapped in try/catch with a timeout and write
 > answer file's own notification, not a message; generic answer words are
 > `answer(s)`, `solution(s)`, `soln(s)` only; partial answers are an owner
 > ruling; filenames only, no PDF text. Where the text below differs, D-61 wins.
+> **D-62 replaces the 10-day escalation** with a lesson-day reminder at 07:00
+> SGT, driven by my timetable (kept in the database), and ages run from
+> Canvas's posted date. Answer tracking can be switched off per module.
 
 When a file lands in `Tutorials` or `Labs` and does not match an answer pattern,
 open a `followups` row in state `awaiting`.

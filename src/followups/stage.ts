@@ -1,11 +1,12 @@
 /**
- * The follow-up stage of a sync (DECISIONS.md D-61). Runs after detection and
- * the archive, before the flush, so a close lands on the answer file's own
+ * The follow-up stage of a sync (DECISIONS.md D-61, D-62). Runs after detection
+ * and the archive, before the flush, so a close lands on the answer file's own
  * notification in the same run -- added at send time, never as its own message.
  *
- * Messages it can send, all through the normal queue (quiet hours apply):
- *   - the first run's ONE summary of what is being tracked;
- *   - one nudge per follow-up, 10 days after its question, never repeated.
+ * Messages it can send, all through the normal queue:
+ *   - the first run's ONE summary of what is being tracked, with real ages;
+ *   - on a day I have a lesson, from 07:00 SGT, ONE reminder of what is overdue
+ *     for the modules with a lesson that day (keyed by date: once a day).
  * Nothing else. Opening, closing, expiring and dismissing are silent; a close
  * shows only as a line on the answer file's notification.
  */
@@ -18,7 +19,8 @@ import type { Db } from '../core/db/writer.ts';
 import { route } from '../archive/route.ts';
 import { loadRules } from '../archive/rules.ts';
 import { enqueueNotice } from '../notify/queue.ts';
-import { describeOpen, planFollowups, type ExistingFollowup, type PartialPolicy, type Plan, type TrackedFile } from './plan.ts';
+import { describeItems, planFollowups, type ExistingFollowup, type PartialPolicy, type Plan, type TrackedFile } from './plan.ts';
+import { planReminder, type OpenItem, type ReminderPlan, type Timetable } from './timetable.ts';
 
 const TERM_REFRESH_MS = 24 * 3600_000;
 
@@ -28,15 +30,16 @@ export interface FollowupOutcome {
   opened: number;
   closedOnArrival: number;
   closed: number;
-  nudged: number;
   expired: number;
+  /** The date a lesson-day reminder was enqueued for, or null. */
+  reminded: string | null;
 }
 
 /** Every file in an enabled course, with where it is (or would be) routed. */
 export async function loadTrackedFiles(db: Db): Promise<TrackedFile[]> {
   const rules = await loadRules(db);
   const rows = await db.read(
-    `SELECT i.id, i.context_id, i.title, i.first_seen_at, i.meta, c.module_code, f.route_category
+    `SELECT i.id, i.context_id, i.title, i.first_seen_at, i.posted_at, i.meta, c.module_code, f.route_category
        FROM items i
        JOIN contexts x ON x.context_id = i.context_id AND x.enabled = 1 AND x.context_type = 'course'
        JOIN courses c ON c.context_id = i.context_id
@@ -53,16 +56,18 @@ export async function loadTrackedFiles(db: Db): Promise<TrackedFile[]> {
       const meta = JSON.parse(String(r['meta'] ?? '{}')) as { folder?: string | null; module?: string | null };
       category = route({ contextType: 'course', folder: meta.folder ?? null, module: meta.module ?? null, fileName: title }, rules.get(contextId) ?? []).category;
     }
-    return { itemId: String(r['id']), contextId, moduleCode: String(r['module_code'] ?? `context ${contextId}`), category, title, firstSeenAt: String(r['first_seen_at']) };
+    return {
+      itemId: String(r['id']), contextId, moduleCode: String(r['module_code'] ?? `context ${contextId}`), category, title,
+      firstSeenAt: String(r['first_seen_at']), postedAt: r['posted_at'] === null ? null : String(r['posted_at']),
+    };
   });
 }
 
 export async function loadExisting(db: Db): Promise<ExistingFollowup[]> {
-  const rows = await db.read('SELECT id, context_id, category, number, state, opened_at, nudged_at FROM followups');
+  const rows = await db.read('SELECT id, context_id, category, number, state, opened_at FROM followups');
   return rows.rows.map((r) => ({
     id: Number(r['id']), contextId: Number(r['context_id']), category: String(r['category']) as ExistingFollowup['category'],
     number: String(r['number']), state: String(r['state']) as ExistingFollowup['state'], openedAt: String(r['opened_at']),
-    nudgedAt: r['nudged_at'] === null ? null : String(r['nudged_at']),
   }));
 }
 
@@ -76,6 +81,36 @@ export async function loadPhrases(db: Db): Promise<Map<number, string[]>> {
 export async function loadTermEnds(db: Db): Promise<Map<number, string | null>> {
   const rows = await db.read('SELECT context_id, term_end_at FROM courses');
   return new Map(rows.rows.map((r) => [Number(r['context_id']), r['term_end_at'] === null ? null : String(r['term_end_at'])]));
+}
+
+export async function loadTrackingOff(db: Db): Promise<Set<number>> {
+  const rows = await db.read('SELECT context_id FROM courses WHERE followups_tracking = 0');
+  return new Set(rows.rows.map((r) => Number(r['context_id'])));
+}
+
+export async function loadTimetable(db: Db): Promise<Timetable> {
+  const slots = await db.read('SELECT context_id, weekday, start_time, first_date, last_date, label FROM lesson_slots');
+  const exceptions = await db.read('SELECT context_id, date FROM lesson_exceptions');
+  return {
+    slots: slots.rows.map((r) => ({
+      contextId: Number(r['context_id']), weekday: Number(r['weekday']), startTime: String(r['start_time']),
+      firstDate: String(r['first_date']), lastDate: String(r['last_date']), label: String(r['label']),
+    })),
+    exceptions: exceptions.rows.map((r) => ({ contextId: r['context_id'] === null ? null : Number(r['context_id']), date: String(r['date']) })),
+  };
+}
+
+/** Open follow-ups right now, for the reminder: answered and dismissed ones are never here. */
+export async function loadOpenItems(db: Db): Promise<OpenItem[]> {
+  const rows = await db.read(
+    `SELECT f.id, f.context_id, f.category, f.number, f.opened_at, c.module_code
+       FROM followups f JOIN courses c ON c.context_id = f.context_id
+      WHERE f.state = 'open' AND c.followups_tracking = 1`,
+  );
+  return rows.rows.map((r) => ({
+    followupId: Number(r['id']), contextId: Number(r['context_id']), moduleCode: String(r['module_code']),
+    category: String(r['category']) as OpenItem['category'], number: String(r['number']), openedAt: String(r['opened_at']),
+  }));
 }
 
 /** Canvas's term.end_at for each active course; null where Canvas gives none. Read-only. */
@@ -92,17 +127,29 @@ export async function fetchTermEnds(db: Db, canvas: CanvasClient): Promise<Map<n
   return out;
 }
 
-export function trackingSummary(plan: Plan): { title: string; lines: string[] } {
+export function trackingSummary(plan: Plan, now: Date): { title: string; lines: string[] } {
   const n = plan.opens.length;
   if (n === 0) return { title: 'Answer follow-ups', lines: ['Tracking 0: nothing is awaiting answers.'] };
-  return { title: 'Answer follow-ups', lines: [`Tracking ${n}: ${describeOpen(plan.opens).join('; ')} awaiting answers.`] };
+  return { title: 'Answer follow-ups', lines: [`Tracking ${n} awaiting answers: ${describeItems(plan.opens, now).join('; ')}.`] };
+}
+
+export function reminderMessage(plan: ReminderPlan, now: Date): { title: string; lines: string[] } {
+  return {
+    title: 'Answers still outstanding',
+    lines: plan.modules.map((m) => {
+      const when = m.lessons.map((l) => `${l.label} ${l.startTime}`).join(', ');
+      const items = describeItems(m.items.map((i) => ({ ...i, postedAt: i.openedAt })), now, { withModule: false }).join('; ');
+      return `${m.moduleCode} ${when} today: ${items}`;
+    }),
+  };
 }
 
 export async function runFollowups(ctx: RunContext, deps: { config: Config; canvas: CanvasClient; now: Date }): Promise<FollowupOutcome> {
   const { config, now } = deps;
   const policy = (config.get('followup_partial_answers') ?? null) as PartialPolicy;
-  const baseline = (config.get('followups_baselined_at') ?? '') === '';
-  const out: FollowupOutcome = { status: 'ran', baseline, opened: 0, closedOnArrival: 0, closed: 0, nudged: 0, expired: 0 };
+  const liveSince = config.get('followups_baselined_at') ?? null;
+  const baseline = (liveSince ?? '') === '';
+  const out: FollowupOutcome = { status: 'ran', baseline, opened: 0, closedOnArrival: 0, closed: 0, expired: 0, reminded: null };
   if (policy === null) {
     // The partial-answer case is the owner's to rule on (D-61); until then,
     // follow-ups do nothing at all rather than guess.
@@ -128,20 +175,17 @@ export async function runFollowups(ctx: RunContext, deps: { config: Config; canv
     phrases: await loadPhrases(ctx.db),
     partialPolicy: policy,
     termEnds: await loadTermEnds(ctx.db),
+    trackingOff: await loadTrackingOff(ctx.db),
     now,
-    baseline,
   });
   const at = now.toISOString();
   const flag = baseline ? 1 : 0;
 
   for (const o of plan.opens) {
-    // A baseline follow-up already past 10 days shows its age in the summary
-    // instead of getting its own nudge: mark it nudged now.
-    const nudged = baseline && o.pastNudge ? at : null;
     await ctx.db.write.execute('open follow-up', {
-      sql: `INSERT INTO followups (context_id, category, number, question_file_id, state, opened_at, recorded_at, baseline, nudged_at)
-            VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?) ON CONFLICT (context_id, category, number) DO NOTHING`,
-      args: [o.contextId, o.category, o.number, o.question.itemId, o.question.firstSeenAt, at, flag, nudged],
+      sql: `INSERT INTO followups (context_id, category, number, question_file_id, state, opened_at, recorded_at, baseline)
+            VALUES (?, ?, ?, ?, 'open', ?, ?, ?) ON CONFLICT (context_id, category, number) DO NOTHING`,
+      args: [o.contextId, o.category, o.number, o.question.itemId, o.postedAt, at, flag],
     });
   }
   for (const c of plan.closedOnArrival) {
@@ -149,7 +193,7 @@ export async function runFollowups(ctx: RunContext, deps: { config: Config; canv
       sql: `INSERT INTO followups (context_id, category, number, question_file_id, state, opened_at, recorded_at, baseline,
                                    closed_at, closed_by_file_id, close_reason)
             VALUES (?, ?, ?, ?, 'closed', ?, ?, ?, ?, ?, 'answered_on_arrival') ON CONFLICT (context_id, category, number) DO NOTHING`,
-      args: [c.contextId, c.category, c.number, c.question.itemId, c.question.firstSeenAt, at, flag, at, c.answer.itemId],
+      args: [c.contextId, c.category, c.number, c.question.itemId, c.question.postedAt ?? c.question.firstSeenAt, at, flag, at, c.answer.itemId],
     });
   }
   for (const c of plan.closes) {
@@ -167,27 +211,24 @@ export async function runFollowups(ctx: RunContext, deps: { config: Config; canv
       args: [at, e.followupId],
     });
   }
-  if (!baseline) {
-    for (const n of plan.nudges) {
-      // The send key makes a second enqueue a no-op even if nudged_at were lost.
-      await enqueueNotice(ctx.db, {
-        sendKey: `followup-nudge ${n.followupId}`,
-        payload: { kind: 'notice', title: 'Answers still not posted', lines: [`${n.moduleCode} ${n.label}: no answers after ${n.ageDays} days. Worth asking in class.`] },
-        now,
-      });
-      await ctx.db.write.execute('record nudge', { sql: 'UPDATE followups SET nudged_at = ? WHERE id = ? AND nudged_at IS NULL', args: [at, n.followupId] });
-    }
-  } else {
-    // The first run: silent, then ONE summary. Keyed, so a retried first run
-    // cannot send it twice.
-    await enqueueNotice(ctx.db, { sendKey: 'followups-baseline', payload: { kind: 'notice', ...trackingSummary(plan) }, now });
+
+  if (baseline) {
+    // The first run: silent, then ONE summary, and no reminder of its own.
+    // Keyed, so a retried first run cannot send it twice.
+    await enqueueNotice(ctx.db, { sendKey: 'followups-baseline', payload: { kind: 'notice', ...trackingSummary(plan, now) }, now });
     await setConfig(ctx.db, ctx.clock, 'followups_baselined_at', at);
+  } else {
+    // After this run's closes and expiries: only what is open NOW.
+    const decision = planReminder({ now, timetable: await loadTimetable(ctx.db), open: await loadOpenItems(ctx.db), liveSince });
+    if (decision.plan !== null) {
+      // One per lesson day, whatever the number of runs after 07:00.
+      await enqueueNotice(ctx.db, { sendKey: `lesson-reminder ${decision.plan.date}`, payload: { kind: 'notice', ...reminderMessage(decision.plan, now) }, now });
+      out.reminded = decision.plan.date;
+    }
   }
 
-  Object.assign(out, {
-    opened: plan.opens.length, closedOnArrival: plan.closedOnArrival.length, closed: plan.closes.length,
-    nudged: baseline ? 0 : plan.nudges.length, expired: plan.expires.length,
-  });
+  Object.assign(out, { opened: plan.opens.length, closedOnArrival: plan.closedOnArrival.length, closed: plan.closes.length, expired: plan.expires.length });
   ctx.log.info('followups.summary', { ...out, ignored: plan.ignored.length, partial: plan.partial.length });
   return out;
 }
+

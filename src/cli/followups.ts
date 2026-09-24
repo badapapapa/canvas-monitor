@@ -18,7 +18,9 @@ import type { RunContext } from '../core/run-context.ts';
 import type { Db } from '../core/db/writer.ts';
 import { followupLabel, type FollowupCategory } from '../followups/classify.ts';
 import { planFollowups, type ExistingFollowup, type Plan } from '../followups/plan.ts';
-import { fetchTermEnds, loadExisting, loadPhrases, loadTrackedFiles, trackingSummary } from '../followups/stage.ts';
+import { fetchTermEnds, loadExisting, loadPhrases, loadTimetable, loadTrackedFiles, loadTrackingOff, reminderMessage, trackingSummary } from '../followups/stage.ts';
+import { contextOf, loadDraft, parseDate } from '../followups/draft.ts';
+import { lastLessonBefore, planReminder, REMINDER_TIME_SGT, sgtDate, sgtInstant } from '../followups/timetable.ts';
 import { tunePatterns } from '../followups/tune.ts';
 
 function refuseUnderCi(): void {
@@ -64,7 +66,7 @@ export async function runTunePatterns(ctx: RunContext): Promise<number> {
   return 0;
 }
 
-export async function runFollowupsCli(ctx: RunContext, args: { action: string | undefined; rest: string[]; module?: string; phrase?: string }): Promise<number> {
+export async function runFollowupsCli(ctx: RunContext, args: { action: string | undefined; rest: string[]; module?: string; phrase?: string; draft?: string; reminderDate?: string }): Promise<number> {
   refuseUnderCi();
   const out = process.stdout;
   const config = await Config.load(ctx.db);
@@ -73,22 +75,25 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
     const migrated = await tableExists(ctx.db, 'followups');
     const existing: ExistingFollowup[] = migrated ? await loadExisting(ctx.db) : [];
     const phrases = (await tableExists(ctx.db, 'answer_patterns')) ? await loadPhrases(ctx.db) : new Map<number, string[]>();
+    const draft = args.draft === undefined ? null : await loadDraft(ctx.db, args.draft);
+    const trackingOff = draft?.trackingOff ?? (migrated ? await loadTrackingOff(ctx.db) : new Set<number>());
+    const timetable = draft?.timetable ?? (migrated ? await loadTimetable(ctx.db) : { slots: [], exceptions: [] });
     const files = await loadTrackedFiles(ctx.db);
     const termEnds = (await fetchTermEnds(ctx.db, canvasFor(ctx, config))) ?? new Map<number, string | null>();
     const now = ctx.clock.now();
     const baseline = (config.get('followups_baselined_at') ?? '') === '';
     const policy = (config.get('followup_partial_answers') ?? null) as 'close' | 'keep_open' | null;
-    const plan = planFollowups({ files, existing, phrases, partialPolicy: policy, termEnds, now, baseline });
+    const plan = planFollowups({ files, existing, phrases, partialPolicy: policy, termEnds, trackingOff, now });
 
     out.write(`\nFollow-up preview${baseline ? ' of the FIRST RUN' : ''} (read-only: nothing stored, nothing sent). ${now.toISOString()}\n`);
     out.write(`Partial-answer ruling (followup_partial_answers): ${policy ?? 'NOT SET: follow-ups will not run until it is'}\n`);
-    section(out, 'WOULD OPEN', plan.opens.map((o) =>
-      `${o.moduleCode} ${o.label}   ${o.question.title}   first seen ${day(o.question.firstSeenAt)} (${o.ageDays} days)` +
-      (o.pastNudge ? (baseline ? '   past 10 days: age shown in the summary, no nudge' : '   past 10 days') : '')));
+    out.write(`Timetable and tracking switches from: ${draft !== null ? `the draft ${args.draft}` : migrated ? 'the database' : 'nowhere yet (no draft, not migrated)'}\n`);
+    section(out, 'WOULD OPEN', plan.opens.map((o) => `${o.moduleCode} ${o.label}   ${o.question.title}   posted ${day(o.postedAt)} (${o.ageDays} days)`));
     section(out, 'WOULD RECORD AS ALREADY ANSWERED (closed, silently)', plan.closedOnArrival.map((c) =>
       `${c.moduleCode} ${c.label}   ${c.question.title}\n        answered by  ${c.answer.title}`));
-    section(out, 'PARTIAL ANSWERS: YOUR RULING', partialCases(plan, { files, existing, phrases, termEnds, now, baseline }));
+    section(out, 'PARTIAL ANSWERS', partialCases(plan, { files, existing, phrases, termEnds, trackingOff, now }));
     section(out, 'IGNORED IN TUTORIALS / LABS (deliberately)', plan.ignored.map((i) => `${i.file.moduleCode}  ${i.file.category.padEnd(9)}  ${i.file.title}   (${i.reason})`));
+    section(out, 'TRACKING SWITCHED OFF FOR THE MODULE (ignored entirely)', plan.trackingOff.map((f) => `${f.moduleCode}  ${f.category.padEnd(9)}  ${f.title}`));
     section(out, 'ANSWER FILES WITH NO QUESTION YET', plan.answersWithoutQuestion.map((a) => `${a.moduleCode} ${a.label}   ${a.file.title}`));
     section(out, 'FURTHER ANSWER FILES (do nothing)', plan.extraAnswers.map((a) => `${a.moduleCode} ${a.label}   ${a.file.title}`));
     // Only the modules follow-ups actually look at (enabled courses).
@@ -96,14 +101,45 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
     const ends = [...termEnds.entries()].filter(([id]) => tracked.has(id)).map(([id, end]) => `${tracked.get(id)}: ${end ?? 'none given: never auto-closed'}`);
     section(out, 'TERM ENDS (from Canvas, live; open follow-ups expire then)', ends);
     if (baseline) {
-      const s = trackingSummary(plan);
-      out.write(`\nTHE ONE MESSAGE THE FIRST RUN WOULD SEND\n  ${s.title}: ${s.lines.join(' ')}\n`);
+      const sm = trackingSummary(plan, now);
+      out.write(`\nTHE ONE MESSAGE THE FIRST RUN WOULD SEND\n  ${sm.title}: ${sm.lines.join(' ')}\n`);
+    }
+    if (args.reminderDate !== undefined) {
+      // As if follow-ups had gone live before that morning and nothing else arrived.
+      const date = parseDate(args.reminderDate);
+      const at = sgtInstant(date, REMINDER_TIME_SGT);
+      const open = plan.opens.map((o, i) => ({ followupId: -(i + 1), contextId: o.contextId, moduleCode: o.moduleCode, category: o.category, number: o.number, openedAt: o.postedAt }));
+      const decision = planReminder({ now: at, timetable, open, liveSince: '1970-01-01T00:00:00Z' });
+      out.write(`\nTHE REMINDER AT ${REMINDER_TIME_SGT} SGT ON ${date} (assuming only what is open now)\n`);
+      if (decision.plan === null) out.write(`  none: ${decision.reason}\n`);
+      else {
+        const m = reminderMessage(decision.plan, at);
+        out.write(`  ${m.title}\n${m.lines.map((l) => `    ${l}`).join('\n')}\n`);
+        for (const mod of decision.plan.modules) {
+          const last = lastLessonBefore(timetable, mod.contextId, at);
+          const sgt = last === null ? 'none' : `${sgtDate(last)} ${new Date(last.getTime() + 8 * 3600_000).toISOString().slice(11, 16)} SGT`;
+          out.write(`  (${mod.moduleCode}: last lesson before then ${sgt}; each item listed was posted before it)\n`);
+        }
+      }
     }
     out.write(migrated ? '\n' : '\n(Migration 0010 is not applied yet; this preview needs none of it.)\n\n');
     return 0;
   }
 
+  if (args.action === 'module') {
+    const onOff = args.rest[0];
+    if ((onOff !== 'on' && onOff !== 'off') || args.module === undefined) throw new AppError('usage', 'Usage: npm run followups -- module off|on --module <code>');
+  }
+
   if (!(await tableExists(ctx.db, 'followups'))) throw new AppError('usage', 'Migration 0010 is not applied yet: run npm run migrate first.');
+
+  if (args.action === 'module') {
+    const onOff = args.rest[0];
+    const contextId = await contextOf(ctx.db, args.module!);
+    await ctx.db.write.execute('set module tracking', { sql: 'UPDATE courses SET followups_tracking = ? WHERE context_id = ?', args: [onOff === 'on' ? 1 : 0, contextId] });
+    out.write(ctx.dryRun ? `\nDRY RUN: would switch answer tracking ${onOff} for ${args.module}.\n` : `\nAnswer tracking ${onOff} for ${args.module}.\n`);
+    return 0;
+  }
 
   if (args.action === 'list') {
     const all = args.rest.includes('--all');
@@ -150,7 +186,7 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
     for (const x of r.rows) out.write(`#${String(x['id'])}  ${String(x['module_code'])}  "${String(x['phrase'])}"\n`);
     return 0;
   }
-  throw new AppError('usage', `Unknown followups action "${args.action}". Use preview, list, dismiss or phrases.`);
+  throw new AppError('usage', `Unknown followups action "${args.action}". Use preview, list, dismiss, module or phrases.`);
 }
 
 function section(out: NodeJS.WriteStream, title: string, lines: string[]): void {

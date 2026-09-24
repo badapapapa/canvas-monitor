@@ -1985,6 +1985,7 @@ Recorded now so they do not drift before the build:
 - The follow-up **dismiss** moves from the CLI to a dashboard button later.
   That button is the one write the dashboard would need, so it must be
   designed against the read-only rule above, not around it: not decided yet.
+  **Parked for Phase 8 by the owner (2026-09-24).**
 
 ---
 
@@ -2059,3 +2060,79 @@ closing without a ruling.
 out for any follow-up the *first run* had opened. That is the main real case --
 opened by the first run, answered weeks later. The rule is now carried by the
 close reason, not the row: only `answers` closes are announced.
+
+---
+
+## D-62 — Lesson-day reminders replace the 10-day nudge; posted dates; per-module off · built 2026-09-24; not live
+
+Owner rulings on the three questions D-61 left open:
+- **Partial answers: `keep_open`.** A partial answer file does not close its
+  follow-up; the rest of the answers must come. The owner sets
+  `followup_partial_answers` at go-live, and can dismiss the follow-up if
+  they never come.
+- **Age runs from Canvas's posted date** (`items.posted_at`), not from when the
+  monitor first saw the file. Detection only began in mid-September, so
+  "first seen" understated every earlier file's age. From now on the two are
+  the same within a sync interval.
+- **Answer tracking can be switched off per module**
+  (`courses.followups_tracking`, `npm run followups -- module off --module
+  <code>`). One module never posts tutorial answers, so its tutorials must never
+  open follow-ups.
+
+**The 10-day nudge is gone.** Answers are released after the lesson, so a
+fixed delay is wrong for every module: one module batched a month's answers at
+once, another answered within days. The replacement:
+- at **07:00 SGT on each day I have a lesson**, ONE message lists that day's
+  modules' outstanding answers, all modules in one message, in lesson order;
+- an item is included only if **at least one lesson for that module has
+  happened since the question was posted**, so this week's worksheet is not
+  overdue before this week's lesson;
+- nothing on days without a lesson (another weekday, recess, a cancelled lab),
+  and nothing when nothing qualifies;
+- it **repeats every lesson day** until the item is answered or dismissed, by
+  design. It is built from the follow-ups open *after* the run's closes, so an
+  answered or dismissed item cannot appear;
+- once a day: keyed by date in the queue, whatever the number of runs after
+  07:00. Quiet hours end at 07:00, and the hourly overnight schedule has a
+  07:00 run; a late run sends it later the same day;
+- the first run sends only its summary (every open item's real age from its
+  posted date). No reminder goes out on the morning follow-ups went live, if
+  that was after 07:00.
+
+**The timetable is personal data**: `lesson_slots` (weekly slot, SGT time,
+first and last date, label) and `lesson_exceptions` (no lesson on a date, for
+one module or for all). It is in the database only, entered with
+`npm run timetable` (add, skip, remove, unskip, list, or `import` of a reviewed
+draft for a first entry), and refused under CI. `followups preview --draft
+<file> --reminder-date <date>` shows a draft's effect before any of it is
+entered.
+
+**Semester dates, verified 2026-09-24** from the NUS Registrar's AY2026/2027
+calendar PDF (dated 30/07/2026), not assumed: instructional Week 1 starts Mon
+10 Aug 2026; recess is 19–27 Sep; Week 7 starts Mon 28 Sep; **Week 13 is Mon 9
+Nov – Fri 13 Nov 2026**; Reading Week runs 14–20 Nov. No Semester 1 public
+holiday falls on a Thursday (the Well-Being Day is Fri 9 Oct; Deepavali is
+observed Mon 9 Nov). The timetable must include the **pre-recess** lessons: a
+timetable starting after recess would say no lesson had yet happened for
+anything posted before it, and the first post-recess reminder would be empty.
+
+Migration 0010 was reshaped before it was ever applied: the nudge column went,
+and the two timetable tables and the per-module switch were added.
+
+**Mutation-check:** the three nudge entries are replaced by eight: a reminder
+before any lesson has passed since posting; a reminder on a day with no lesson,
+both for the weekday and for recess or a cancelled lab; a reminder for a
+dismissed or answered item; a second reminder the same day; a reminder the
+morning follow-ups went live after 07:00; a tracking-off module still opening
+follow-ups; and age taken from first seen instead of posted.
+
+**leak-check closes a gap.** It matched real titles of 16+ characters only, so
+short real file names (a bare `<word>.zip`) could pass unnoticed; some were quoted
+in a brief and copied into tests before being caught by hand. Now every file
+name under 16 characters from the database is also a pattern, matched only as a
+whole file name (no letter, digit, `.`, `-` or `_` on either side). Generic
+ones are listed in the gitignored `leak-check.allow`, because listing real
+names in the repository would itself be the leak. Proven by planting one: it
+was reported in the working tree and in the object store, then removed and
+pruned. Short announcement and assignment titles ("Quiz 1") stay out of scope:
+they are not file names, and they match everything.
