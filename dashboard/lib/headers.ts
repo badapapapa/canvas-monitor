@@ -7,8 +7,11 @@
  *   all (no fonts, analytics or CDNs), frame-ancestors 'none'.
  * - Cache-Control: no-store, so no browser, proxy or CDN keeps a copy.
  * - X-Robots-Tag: noindex, nofollow.
- * - Referrer-Policy: no-referrer, so a click to Canvas, OneDrive or Google
- *   Calendar does not reveal the dashboard's address.
+ * - Referrer-Policy: same-origin, so a click to Canvas, OneDrive or Google
+ *   Calendar does not reveal the dashboard's address. NOT no-referrer: under
+ *   no-referrer, browsers send `Origin: null` on every POST, even same-origin
+ *   ones (Fetch standard), and the login's CSRF check would refuse them all
+ *   (D-66; found in a real browser, not by fetch-based tests).
  */
 
 export function contentSecurityPolicy(nonce: string, dev: boolean): string {
@@ -32,7 +35,7 @@ export function securityHeaders(nonce: string, dev: boolean): Record<string, str
     'Content-Security-Policy': contentSecurityPolicy(nonce, dev),
     'Cache-Control': 'no-store, max-age=0',
     'X-Robots-Tag': 'noindex, nofollow, noarchive',
-    'Referrer-Policy': 'no-referrer',
+    'Referrer-Policy': 'same-origin',
     'X-Content-Type-Options': 'nosniff',
     'X-Frame-Options': 'DENY',
     'Cross-Origin-Opener-Policy': 'same-origin',

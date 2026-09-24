@@ -2295,7 +2295,7 @@ invalidation.
   - `X-Robots-Tag: noindex, nofollow, noarchive`, and robots metadata;
   - a nonce CSP with `'strict-dynamic'`, `frame-ancestors 'none'`,
     `object-src 'none'`, `base-uri 'none'`, `form-action 'self'`;
-  - `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, COOP and CORP
+  - `X-Frame-Options: DENY`, `Referrer-Policy: same-origin` (D-66), COOP and CORP
     same-origin, `nosniff`, `Permissions-Policy` and HSTS;
   - no `X-Powered-By`.
 
@@ -2359,3 +2359,122 @@ invalidation.
   - the `tempauth` URL CHECK removed;
   - the password script printing its secrets under CI. It refuses when `CI`,
     `GITHUB_ACTIONS` or `VERCEL` is set, because Actions logs here are public.
+
+---
+
+## D-66 — Dashboard hardening before the preview · 2026-09-24
+
+Owner's changes after step 2. The read model exists, and `verify` passed five
+of five against Turso.
+
+**1. `verify` accepts only an authorisation refusal.** Before, any error
+counted as "refused", so a network blip or a server fault could have passed.
+Now a refusal passes only if Turso answered **HTTP 401 or 403**. Anything
+else fails and prints its code and status: a timeout, a DNS failure, a 5xx.
+- **Evidence, from libsql-server's source (`error.rs`, `hrana/stmt.rs`):**
+  - a token Turso rejects (`AuthError`) answers 401;
+  - a write on a read-only token (`NotAuthorized`) is not turned into a
+    statement error. It propagates and also answers 401, with a JSON body
+    `{"error": ...}`;
+  - `@libsql/client` reports that as `SERVER_ERROR` and keeps the status on
+    the error's `cause`. That is what the owner saw.
+- 403 is accepted too, for a proxy in front that answers "forbidden" rather
+  than "unauthorised".
+- `verify` prints the code and status only, e.g. `SERVER_ERROR HTTP 401`,
+  never a message, token or URL.
+- **Tests:** `test/unit/readmodel-verify.test.ts` runs `verify` against fake
+  Turso servers. Every check passes on 401 and on 403. It fails on 500 and
+  502, when a server is unreachable, when a read-only write is accepted, and
+  when a token reaches the other database.
+
+**2. The read-only token's expiry is alerted like the Canvas token's.**
+- The new config key `dashboard_read_token_expires_at` holds the **date
+  only**. The token is never stored in the main database.
+- The sync raises the same ladder through the ops chat: T−14, T−7, T−3, T−1,
+  then expired. Canvas's messages are unchanged: both now share one ladder.
+- "Not recorded" is raised only when the read model is configured.
+- `verify` has a **sixth check**: the recorded date must be no later than the
+  token's own `exp` claim, which verify reads from the token, and less than
+  a day earlier. Otherwise the alerts would come late, or cry wolf. It prints
+  that date and nothing else from the token.
+- The token was created 2026-09-24 at about 12:04 UTC for 90 days, so it
+  expires about 2026-12-23 12:04 UTC.
+- Rotation, including the group-wide invalidation caveat (D-65): README,
+  "Rotating the dashboard's read-only token".
+
+**3. Vercel Authentication: yes, and Hobby allows it on production.**
+- Checked 2026-09-24 against Vercel's docs (pages updated 2026-09-15; changelog
+  "Protect production deployments for free on every plan", 2026-09-09):
+  - Vercel Authentication is included on Hobby;
+  - so is the **All Deployments** scope, which "protects all URLs, including
+    your production domain";
+  - Standard Protection would leave the production domain open, so it is
+    **not** the scope to pick.
+- **Its bypasses, all to be left unused:**
+  - Shareable Links;
+  - Protection Bypass for Automation;
+  - access requests, which a stranger can send and only the owner can
+    approve. Never approve one.
+- It sits in front of the app's own password. Signing up to Vercel **with
+  GitHub** (the owner's choice) makes GitHub's two-factor the one identity
+  guarding both. GitHub already guards the repository and the Actions secrets,
+  including the main database token, so this adds no new identity to protect.
+
+**4. No dependency install scripts on Vercel.**
+- `vercel.json` sets `"installCommand": "npm ci --ignore-scripts"`, and
+  `dashboard/.npmrc` sets `ignore-scripts=true`. That covers any npm install
+  there, including one overridden in Vercel's UI. `npm run build` still runs,
+  because explicitly run scripts are unaffected.
+- **No locked dependency declares an install script** (none has
+  `hasInstallScript` in the lockfile). A clean `npm ci --ignore-scripts`
+  followed by `next build` succeeds. So no package needs its script.
+- A test fails the build if a future dependency declares one, so that is
+  decided then, not discovered.
+
+**5. Sessions last 30 days** (was 12 hours), by the owner's choice.
+- **Revoking access** means changing `DASHBOARD_SESSION_SECRET` in Vercel and
+  **redeploying**: Vercel applies env changes to new deployments only.
+- Every cookie is HMAC-signed with that secret, so every device is signed out
+  at once. Nothing server-side needs clearing, because there is nothing
+  server-side.
+- Changing the password does the same, because sessions are bound to the
+  password hash.
+- **Proved** by a unit test (sessions from several devices, all refused under
+  a new secret) and by the smoke test (the production build restarted with a
+  new secret sends the old cookie to `/login`).
+
+**6. A real bug, found only in a real browser: `Referrer-Policy: same-origin`.**
+- The local preview's first browser login was refused as cross-site (403).
+- The cause was D-65's `Referrer-Policy: no-referrer`. Under that policy the
+  Fetch standard makes a browser send `Origin: null` on every POST, including
+  a same-origin one, and the CSRF check correctly refuses `null`.
+- The smoke test missed it because it posts from Node with an explicit
+  `Origin`.
+- **Fixed** with `same-origin`: same-origin POSTs carry the real Origin, and
+  clicks out to Canvas, OneDrive or Google Calendar still send no referrer at
+  all (their links also carry `rel="noreferrer"`). The CSRF check is
+  unchanged, and still refuses `null`.
+- A test and a mutation keep it that way, and the smoke test checks the
+  header. The browser flow is now checked by hand in the preview; there is no
+  headless browser in the test suite.
+
+**7. Next rewrites environment variables named in a `.env` file.** Its loader
+expands `$NAME` in every variable a `.env*` file names, **including the
+value already in the real environment**. A scrypt hash is full of `$`.
+- The preview script escapes every `$` in `dashboard/.env.local`.
+- The smoke test refuses to run while such a file exists.
+- On Vercel there is no `.env*` file: they are gitignored, and
+  `dashboard/.vercelignore` keeps them out of a CLI deploy too (tested). The
+  values set in Vercel's settings are therefore used as they are. The first
+  production sign-in confirms it.
+
+**Mutation-check, 6 new entries, all caught (78 in total):**
+- the `no-referrer` policy back;
+- verify counting any failure as a refusal;
+- verify accepting a recorded expiry later than the token's;
+- no expiry alert for the dashboard token;
+- Vercel installing with scripts;
+- `.npmrc` allowing scripts.
+
+The mutation-check's scratch copy now also leaves out `dashboard/.env*` and
+`.vercel`, so a local preview's real token is never copied.

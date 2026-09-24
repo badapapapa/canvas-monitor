@@ -37,6 +37,7 @@ const FOLLOWUPS = 'test/unit/followups.test.ts';
 const CLI_FOLLOWUPS = 'test/unit/cli-followups.test.ts';
 const DASHBOARD = 'test/unit/dashboard.test.ts';
 const READMODEL = 'test/unit/readmodel.test.ts';
+const VERIFY = 'test/unit/readmodel-verify.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -529,6 +530,48 @@ const MUTATIONS: Mutation[] = [
     tests: [DASHBOARD],
   },
   {
+    name: 'verify counting ANY failure as a refusal (a network blip or a server fault would pass)',
+    file: 'src/readmodel/cli.ts',
+    from: 'return { ok: false, authRefusal: status === 401 || status === 403, detail: describe(error) };',
+    to: 'return { ok: false, authRefusal: true, detail: describe(error) };',
+    tests: [VERIFY],
+  },
+  {
+    name: 'verify accepting a recorded token expiry LATER than the real one (alerts too late)',
+    file: 'src/readmodel/cli.ts',
+    from: 'if (at > tokenExp.getTime()) return',
+    to: 'if (false) return',
+    tests: [VERIFY],
+  },
+  {
+    name: "no expiry alert for the dashboard's read-only token",
+    file: 'src/sync/run.ts',
+    from: '    if (dashboardToken !== null) alerts.push(dashboardToken);\n',
+    to: '',
+    tests: [SYNC],
+  },
+  {
+    name: 'Vercel running dependency install scripts',
+    file: 'dashboard/vercel.json',
+    from: '"installCommand": "npm ci --ignore-scripts",',
+    to: '"installCommand": "npm ci",',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'npm install scripts allowed in the dashboard (.npmrc)',
+    file: 'dashboard/.npmrc',
+    from: 'ignore-scripts=true',
+    to: 'ignore-scripts=false',
+    tests: [DASHBOARD],
+  },
+  {
+    name: "Referrer-Policy no-referrer (browsers then send Origin: null on the login POST, refusing every login)",
+    file: 'dashboard/lib/headers.ts',
+    from: "'Referrer-Policy': 'same-origin',",
+    to: "'Referrer-Policy': 'no-referrer',",
+    tests: [DASHBOARD],
+  },
+  {
     name: 'the password script printing secrets under CI',
     file: 'dashboard/scripts/hash-password.ts',
     from: "if (process.env['CI'] !== undefined || process.env['GITHUB_ACTIONS'] !== undefined || process.env['VERCEL'] !== undefined) {",
@@ -575,10 +618,11 @@ let problems = 0;
 try {
   for (const entry of COPY) cpSync(path.join(ROOT, entry), path.join(work, entry), { recursive: true });
   symlinkSync(path.join(ROOT, 'node_modules'), path.join(work, 'node_modules'));
-  // The dashboard's source, without its build output; its packages by symlink.
+  // The dashboard's source, without its build output or any local secrets file
+  // (.env.local holds a real read-only token during a preview); packages by symlink.
   cpSync(path.join(ROOT, 'dashboard'), path.join(work, 'dashboard'), {
     recursive: true,
-    filter: (src) => !/[\\/](node_modules|\.next)([\\/]|$)/.test(path.relative(ROOT, src)),
+    filter: (src) => !/[\\/](node_modules|\.next|\.vercel|\.env[^\\/]*)([\\/]|$)/.test(path.relative(ROOT, src)),
   });
   symlinkSync(path.join(ROOT, 'dashboard', 'node_modules'), path.join(work, 'dashboard', 'node_modules'));
 

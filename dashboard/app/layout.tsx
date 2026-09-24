@@ -5,7 +5,7 @@ import './globals.css';
 export const metadata: Metadata = {
   title: 'Canvas Monitor',
   robots: { index: false, follow: false, nocache: true, googleBot: { index: false, follow: false } },
-  referrer: 'no-referrer',
+  referrer: 'same-origin',
 };
 
 export const viewport: Viewport = { width: 'device-width', initialScale: 1, themeColor: '#F5F3EE' };

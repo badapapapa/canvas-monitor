@@ -19,7 +19,7 @@ import { CanvasHttp } from '../canvas/http.ts';
 import { RateLimitGovernor } from '../canvas/rate-limit.ts';
 import { createRawStore } from '../canvas/raw-store.ts';
 import type { CanvasAnnouncement, CanvasAssignment } from '../canvas/types.ts';
-import { Config, tokenDaysRemaining } from '../core/config.ts';
+import { Config, daysRemaining, tokenDaysRemaining } from '../core/config.ts';
 import { AppError, messageOf } from '../core/errors.ts';
 import { describe, ok, type Result } from '../core/result.ts';
 import type { RunContext } from '../core/run-context.ts';
@@ -37,7 +37,7 @@ import {
   type ItemRecord,
   type ResourceType,
 } from '../ingest/normalise.ts';
-import { reconcileAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
+import { dashboardTokenExpiryCondition, reconcileAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
 import { enqueueContent, enqueueNotice, enqueueOps, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
 import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
@@ -351,10 +351,18 @@ async function syncBody(
   const now = ctx.clock.now();
   const outcome = empty('ok');
   const alerts: AlertCondition[] = [];
-  const evaluatedPrefixes: string[] = ['token_expiry@', 'telegram_delivery'];
+  const evaluatedPrefixes: string[] = ['token_expiry@', 'dashboard_token_expiry@', 'telegram_delivery'];
 
   const token = tokenExpiryCondition(tokenDaysRemaining(config, now));
   if (token !== null) alerts.push(token);
+
+  // The dashboard's read-only token (D-66): once one is recorded, or once the
+  // read model is configured (then "not recorded" is itself worth saying).
+  const dashboardDays = daysRemaining(config, 'dashboard_read_token_expires_at', now);
+  if (dashboardDays !== null || readModelConfigured()) {
+    const dashboardToken = dashboardTokenExpiryCondition(dashboardDays);
+    if (dashboardToken !== null) alerts.push(dashboardToken);
+  }
 
   const failedSends = await ctx.db.read({
     sql: `SELECT count(*) AS n FROM notifications WHERE state = 'failed' AND created_at > ?`,

@@ -48,6 +48,21 @@ describe('dashboard session: a signed cookie, nothing stored', () => {
     assert.equal(await verifySession(future, opts), null, 'issued in the future');
     assert.equal(await verifySession(v, { ...opts, secret: 'short' }), null, 'a weak secret is refused, not used');
   });
+
+  it('lasts 30 days, and no longer (D-66)', async () => {
+    assert.equal(SESSION_TTL_SECONDS, 30 * 24 * 3600);
+    const v = await signSession({ secret: SECRET, passwordHash: HASH_A, nowSeconds: T });
+    const at = (days: number) => verifySession(v, { secret: SECRET, passwordHash: HASH_A, nowSeconds: T + days * 86_400 });
+    assert.equal((await at(29.9))?.kind, 'verified-session');
+    assert.equal(await at(30), null);
+  });
+
+  it('rotating the session secret signs out every device at once (the revocation path)', async () => {
+    const devices = await Promise.all([T, T + 3600, T + 86_400].map((t) => signSession({ secret: SECRET, passwordHash: HASH_A, nowSeconds: t })));
+    const opts = { secret: SECRET, passwordHash: HASH_A, nowSeconds: T + 2 * 86_400 };
+    for (const d of devices) assert.equal((await verifySession(d, opts))?.kind, 'verified-session');
+    for (const d of devices) assert.equal(await verifySession(d, { ...opts, secret: 'r'.repeat(64) }), null);
+  });
 });
 
 describe('dashboard password: scrypt hash, constant-time check', () => {
@@ -87,7 +102,12 @@ describe('dashboard headers', () => {
     assert.match(h['X-Robots-Tag']!, /noindex/);
     assert.match(h['X-Robots-Tag']!, /nofollow/);
     assert.equal(h['X-Frame-Options'], 'DENY');
-    assert.equal(h['Referrer-Policy'], 'no-referrer');
+    // same-origin, never no-referrer: under no-referrer a browser sends `Origin: null`
+    // on its own same-origin login POST, and the CSRF check refuses every login (D-66).
+    assert.equal(h['Referrer-Policy'], 'same-origin');
+    for (const f of ['app/layout.tsx', 'next.config.ts']) {
+      assert.doesNotMatch(readFileSync(path.join(DASH, f), 'utf8'), /['"]no-referrer['"]/, `${f} sets no-referrer`);
+    }
   });
 
   it('has a strict CSP: nonce scripts only, no inline, no third-party origin, no framing', () => {
@@ -236,9 +256,23 @@ describe('dashboard code: structural guarantees', () => {
   });
 
   it('turns off every deployment but main, and runs near the database', () => {
-    const v = JSON.parse(readFileSync(path.join(DASH, 'vercel.json'), 'utf8')) as { git: { deploymentEnabled: Record<string, boolean> }; regions: string[] };
+    const v = JSON.parse(readFileSync(path.join(DASH, 'vercel.json'), 'utf8')) as { git: { deploymentEnabled: Record<string, boolean> }; regions: string[]; installCommand: string };
     assert.deepEqual(v.git.deploymentEnabled, { '**': false, main: true });
     assert.deepEqual(v.regions, ['hnd1']);
+  });
+
+  it('runs no dependency install script: on Vercel, in any npm install here, and none is locked (D-66)', () => {
+    const v = JSON.parse(readFileSync(path.join(DASH, 'vercel.json'), 'utf8')) as { installCommand?: string };
+    assert.equal(v.installCommand, 'npm ci --ignore-scripts');
+    assert.match(readFileSync(path.join(DASH, '.npmrc'), 'utf8'), /^ignore-scripts=true$/m);
+    const lock = JSON.parse(readFileSync(path.join(DASH, 'package-lock.json'), 'utf8')) as { packages: Record<string, { hasInstallScript?: boolean }> };
+    const withScripts = Object.entries(lock.packages).filter(([, p]) => p.hasInstallScript === true).map(([k]) => k);
+    assert.deepEqual(withScripts, [], 'a dependency now declares an install script: decide whether the build needs it (D-66)');
+  });
+
+  it('never uploads a local .env file in a CLI deploy (.vercelignore)', () => {
+    const ignore = readFileSync(path.join(DASH, '.vercelignore'), 'utf8').split('\n').map((l) => l.trim());
+    assert.ok(ignore.includes('.env*'));
   });
 });
 

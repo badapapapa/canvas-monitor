@@ -43,3 +43,6 @@ dashboard/.vercel/
 dashboard/.env*
 dashboard/next-env.d.ts
 dashboard/*.tsbuildinfo
+
+# The desktop app's local preview config.
+.claude/

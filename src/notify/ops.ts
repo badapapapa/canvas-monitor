@@ -166,6 +166,35 @@ export async function reconcileAlerts(
   return outcome;
 }
 
+/** One credential's expiry ladder: T-14, T-7, T-3, T-1, expired, and unknown. */
+interface ExpiryLadder {
+  family: string;
+  /** Sentence subject, e.g. "The Canvas token". */
+  subject: string;
+  unknown: string;
+  record: string;
+  expired: string;
+  rotate: string;
+}
+
+function expiryLadder(l: ExpiryLadder, daysRemaining: number | null): AlertCondition | null {
+  if (daysRemaining === null) {
+    return { key: `${l.family}@unknown`, severity: 'warn', summary: l.unknown, detail: l.record, remindEveryMs: null };
+  }
+  if (daysRemaining <= 0) {
+    return { key: `${l.family}@expired`, severity: 'critical', summary: l.expired, detail: l.rotate };
+  }
+  const rung = daysRemaining <= 1 ? 1 : daysRemaining <= 3 ? 3 : daysRemaining <= 7 ? 7 : daysRemaining <= 14 ? 14 : null;
+  if (rung === null) return null;
+  return {
+    key: `${l.family}@${rung}`,
+    severity: rung <= 3 ? 'critical' : 'warn',
+    summary: `${l.subject} expires in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}.`,
+    detail: l.rotate,
+    remindEveryMs: null,
+  };
+}
+
 /**
  * Canvas token expiry ladder: T-14, T-7, T-3, T-1 (SPEC.md section 12), plus
  * expired and unknown. Each rung is sent once, never reminded, except expired,
@@ -173,26 +202,27 @@ export async function reconcileAlerts(
  * fixed.
  */
 export function tokenExpiryCondition(daysRemaining: number | null): AlertCondition | null {
-  if (daysRemaining === null) {
-    return {
-      key: 'token_expiry@unknown',
-      severity: 'warn',
-      summary: 'Canvas token expiry is not recorded, so expiry alerts cannot fire.',
-      detail: 'Record the date Canvas showed when the token was created: npm run set-config canvas_token_expires_at',
-      remindEveryMs: null,
-    };
-  }
-  const rotate = 'Generate a new token in Canvas, then: npm run set-config canvas_token (and canvas_token_expires_at).';
-  if (daysRemaining <= 0) {
-    return { key: 'token_expiry@expired', severity: 'critical', summary: 'The Canvas token has EXPIRED. Nothing is being synced.', detail: rotate };
-  }
-  const rung = daysRemaining <= 1 ? 1 : daysRemaining <= 3 ? 3 : daysRemaining <= 7 ? 7 : daysRemaining <= 14 ? 14 : null;
-  if (rung === null) return null;
-  return {
-    key: `token_expiry@${rung}`,
-    severity: rung <= 3 ? 'critical' : 'warn',
-    summary: `The Canvas token expires in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}.`,
-    detail: rotate,
-    remindEveryMs: null,
-  };
+  return expiryLadder({
+    family: 'token_expiry',
+    subject: 'The Canvas token',
+    unknown: 'Canvas token expiry is not recorded, so expiry alerts cannot fire.',
+    record: 'Record the date Canvas showed when the token was created: npm run set-config canvas_token_expires_at',
+    expired: 'The Canvas token has EXPIRED. Nothing is being synced.',
+    rotate: 'Generate a new token in Canvas, then: npm run set-config canvas_token (and canvas_token_expires_at).',
+  }, daysRemaining);
+}
+
+/**
+ * The dashboard's read-only Turso token (DECISIONS.md D-66): the same ladder.
+ * Only its expiry DATE is in the main database, never the token.
+ */
+export function dashboardTokenExpiryCondition(daysRemaining: number | null): AlertCondition | null {
+  return expiryLadder({
+    family: 'dashboard_token_expiry',
+    subject: "The dashboard's read-only token",
+    unknown: "The dashboard's read-only token expiry is not recorded, so its expiry alerts cannot fire.",
+    record: 'Record it: npm run set-config dashboard_read_token_expires_at (npm run readmodel -- verify prints the date).',
+    expired: "The dashboard's read-only token has EXPIRED. The dashboard shows nothing until it is rotated.",
+    rotate: "Rotate it: README, 'Rotating the dashboard's read-only token'.",
+  }, daysRemaining);
 }

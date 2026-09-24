@@ -1,0 +1,6 @@
+# Never upload local secrets or build output in a CLI deploy (D-66). Git deploys
+# never see them anyway: they are gitignored.
+.env*
+.next
+node_modules
+.vercel

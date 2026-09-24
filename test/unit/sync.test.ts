@@ -402,6 +402,23 @@ describe('sync end to end', () => {
     assert.match(ops(h).at(-1)?.text ?? '', /Resolved/);
   });
 
+  it("alerts on the dashboard's read-only token expiry through the ops chat, from the recorded date only (D-66)", async () => {
+    const db = createDb(h.client, silentLogger(), false);
+    await sync(h);
+    assert.ok(!ops(h).some((s) => s.text.includes('dashboard')), 'nothing recorded, no read model configured: silent');
+    await setConfig(db, h.clock, 'dashboard_read_token_expires_at', '2026-09-17T00:00:00Z'); // 5.8 days
+    await sync(h);
+    assert.match(ops(h).at(-1)?.text ?? '', /The dashboard's read-only token expires in 5 days/);
+    h.clock.set('2026-09-15T04:00:00Z'); // 1.8 days
+    await sync(h);
+    const texts = ops(h).map((s) => s.text);
+    assert.match(texts.at(-1) ?? '', /expires in 1 day\b/);
+    assert.ok(!texts.some((t) => t.includes('Resolved')), 'climbing a rung is not a recovery');
+    await setConfig(db, h.clock, 'dashboard_read_token_expires_at', '2026-12-10T00:00:00Z'); // rotated
+    await sync(h);
+    assert.match(ops(h).at(-1)?.text ?? '', /Resolved/);
+  });
+
   it('marks undeliverable notifications failed and fails the run', async () => {
     await sync(h);
     h.telegramMode.value = 'forbidden';

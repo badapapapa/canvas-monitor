@@ -11,13 +11,14 @@
  *   - with the session, the pages render the data;
  *   - every response is no-store, noindex, framed by nobody, under a nonce CSP,
  *     and every script tag carries that nonce;
+ *   - changing the session secret signs the existing session out;
  *   - a preview environment (VERCEL_ENV=preview) serves nothing at all.
  *
  * Invented data only. Uses a random local port and temporary files.
  */
 
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,6 +31,14 @@ const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const DASH = path.join(ROOT, 'dashboard');
 const PASSWORD = 'smoke-test-password-not-real-0123';
 const MARKER = 'ZZ9999'; // an invented module code: it must never appear before login
+
+// A dashboard/.env* file (the local preview's) would be loaded by `next start`, and Next's
+// loader rewrites any variable it names, expanding every `$` -- the scrypt hash's too.
+// The smoke test runs on invented data only, so it refuses rather than mix the two.
+if (readdirSync(DASH).some((f) => f.startsWith('.env'))) {
+  console.error('dashboard smoke: dashboard/.env* exists (the local preview). Remove it first: npm run dashboard:preview -- --clean');
+  process.exit(1);
+}
 
 const work = mkdtempSync(path.join(tmpdir(), 'dash-smoke-'));
 const children: ChildProcess[] = [];
@@ -89,6 +98,7 @@ try {
     assert.match(res.headers.get('x-robots-tag') ?? '', /noindex/, `${what}: x-robots-tag`);
     assert.match(res.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/, `${what}: csp`);
     assert.equal(res.headers.get('x-powered-by'), null, `${what}: x-powered-by`);
+    assert.equal(res.headers.get('referrer-policy'), 'same-origin', `${what}: referrer-policy (no-referrer breaks browser logins, D-66)`);
   };
 
   for (const p of ['/', '/m/1', '/m/2', '/anything']) {
@@ -132,6 +142,14 @@ try {
   assert.equal((await get('/m/1', cookie)).status, 200);
   assert.equal((await get('/m/999', cookie)).status, 404);
   assert.ok(!/ZZ9999|Invented/.test(logs()), 'no course data in the server logs');
+
+  // --- revocation: a new session secret signs every existing session out (D-66) ------------
+  const rotatedPort = port + 2;
+  await start(rotatedPort, { DASHBOARD_LOCAL: '1', DASHBOARD_SESSION_SECRET: 'r'.repeat(64) });
+  const afterRotation = await fetch(`http://127.0.0.1:${rotatedPort}/`, { redirect: 'manual', headers: { cookie } });
+  assert.equal(afterRotation.status, 303, 'the old session is refused after the secret changes');
+  assert.equal(new URL(afterRotation.headers.get('location') ?? '', base).pathname, '/login');
+  assert.ok(!(await afterRotation.text()).includes(MARKER), 'no data for the old session');
 
   // --- a preview deployment: nothing at all ------------------------------------------
   const previewPort = port + 1;

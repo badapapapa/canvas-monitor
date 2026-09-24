@@ -4,7 +4,9 @@
  *   value = base64url(JSON {v, iat, exp, pv}) "." base64url(HMAC-SHA256(secret, payload))
  *
  * - Signed with DASHBOARD_SESSION_SECRET (Vercel, Production only). Rotating it
- *   ends every session at once.
+ *   (and redeploying: Vercel applies env changes to new deployments only) ends
+ *   every session on every device at once. That is how access is revoked (D-66).
+ * - 30 days, by the owner's choice (D-66); no server-side store, so no refresh.
  * - `pv` binds the session to the current password hash: changing the password
  *   also ends every session.
  * - Verified with Web Crypto's `verify`, a constant-time comparison, so it runs
@@ -14,7 +16,7 @@
  */
 
 export const SESSION_COOKIE = '__Host-cm_session';
-export const SESSION_TTL_SECONDS = 12 * 3600;
+export const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 
 /** Proof that a request carried a valid session. Only `verifySession` makes one. */
 export interface VerifiedSession {

@@ -260,7 +260,7 @@ model. The dashboard holds a read-only token for that database alone.
 | Command | What it does |
 |---|---|
 | `npm run readmodel -- migrate` | Create the read model's tables (write token). |
-| `npm run readmodel -- verify` | Prove the token separation against Turso. All five checks must pass before deploying. |
+| `npm run readmodel -- verify` | Prove the token separation against Turso, and the recorded expiry. All six checks must pass before deploying. |
 | `npm run readmodel -- publish` | Publish once now (the sync does it every run). |
 | `node dashboard/scripts/hash-password.ts` | Generate the dashboard password, its hash and the session secret. |
 | `npm run dashboard:smoke` | Build the dashboard and check it over HTTP on invented data. |
@@ -270,6 +270,44 @@ secrets (the sync's write token) and Vercel's Production environment (the
 dashboard's read token, password hash and session secret). A preview
 deployment is never built, is given no secrets, and would serve nothing if it
 were.
+
+### Revoking access
+
+Change `DASHBOARD_SESSION_SECRET` in Vercel (Production), then **redeploy**:
+Vercel applies env changes to new deployments only. Every session on every
+device ends at once. Sessions otherwise last 30 days. Changing the password
+hash does the same.
+
+### Rotating the dashboard's read-only token
+
+It expires 90 days after creation. The ops chat warns at 14, 7, 3 and 1 days
+(`dashboard_read_token_expires_at`: the date only, never the token).
+
+**Routine rotation.** Creating a new token does not revoke the old one, which
+simply expires. From the repo root:
+
+1. Remove the old line, then add the new token, without printing it:
+   ```
+   sed -i '' '/^READMODEL_READ_TOKEN=/d' .env
+   printf 'READMODEL_READ_TOKEN=%s\n' "$(turso db tokens create canvas-readmodel --read-only --expiration 90d)" >> .env
+   ```
+2. `npm run readmodel -- verify`. Check 6 fails and prints the new token's
+   expiry. Record it: `npm run set-config dashboard_read_token_expires_at`
+   (paste the date, then Ctrl-D). Run verify again: six PASS.
+3. Vercel → Settings → Environment Variables: replace `READMODEL_READ_TOKEN`
+   (Production only, Sensitive), then redeploy.
+
+**If a token has leaked.** `turso db tokens invalidate canvas-readmodel`
+revokes it. But on the free plan both databases share one group, and
+invalidation is **group-wide**. It also revokes the main database token and
+the read model's write token. Sync runs fail until all three are replaced:
+1. main: `turso db tokens create <main database>` → `TURSO_AUTH_TOKEN` in
+   `.env` and in the GitHub secret;
+2. write: `turso db tokens create canvas-readmodel` → `READMODEL_WRITE_TOKEN`
+   in `.env` and in the GitHub secret;
+3. read: as in routine rotation above, including Vercel and the recorded
+   expiry;
+4. `npm run readmodel -- verify`: six PASS.
 
 ## Privacy posture
 

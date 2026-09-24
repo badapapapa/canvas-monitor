@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { after, describe, it } from 'node:test';
 import { escapeHtml, formatSgt, pack, relativeTo, render, renderDigest, type ContentPayload } from '../../src/notify/render.ts';
 import { batchKey } from '../../src/notify/queue.ts';
-import { tokenExpiryCondition } from '../../src/notify/ops.ts';
+import { dashboardTokenExpiryCondition, tokenExpiryCondition } from '../../src/notify/ops.ts';
 import { MESSAGE_LIMIT, TelegramClient } from '../../src/notify/telegram.ts';
 import { scrubString } from '../../src/core/redact.ts';
 import { latestSlotAtOrBefore, parseCron } from '../../src/core/cron.ts';
@@ -193,6 +193,9 @@ describe('token expiry ladder', () => {
     assert.equal(tokenExpiryCondition(1)?.key, 'token_expiry@1');
     assert.equal(tokenExpiryCondition(0)?.key, 'token_expiry@expired');
     assert.equal(tokenExpiryCondition(null)?.key, 'token_expiry@unknown');
+    for (const [days, key] of [[30, undefined], [14, 'dashboard_token_expiry@14'], [7, 'dashboard_token_expiry@7'], [3, 'dashboard_token_expiry@3'], [1, 'dashboard_token_expiry@1'], [0, 'dashboard_token_expiry@expired'], [null, 'dashboard_token_expiry@unknown']] as const) {
+      assert.equal(dashboardTokenExpiryCondition(days)?.key, key, String(days));
+    }
   });
 
   it('never reminds within a rung, except once expired', () => {

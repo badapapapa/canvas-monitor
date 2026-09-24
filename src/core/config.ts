@@ -43,6 +43,12 @@ export const CONFIG_SPEC = {
     description: 'ISO-8601 expiry of canvas_token, as shown by Canvas at creation.',
     envVar: 'CANVAS_TOKEN_EXPIRES_AT',
   },
+  dashboard_read_token_expires_at: {
+    secret: false,
+    description: "ISO-8601 expiry of the dashboard's read-only Turso token (D-66). The date only: the token itself is never stored here.",
+    pattern: /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?Z$/,
+    formatHint: 'ISO-8601 UTC, e.g. 2026-12-23T12:00:00Z',
+  },
   raw_capture_enabled: {
     secret: false,
     description: 'Capture raw Canvas responses to var/raw for later --replay.',
@@ -250,7 +256,12 @@ export async function setConfig(db: Db, clock: Clock, key: ConfigKey, value: str
 
 /** Days until the Canvas token expires, or null if no expiry is recorded. */
 export function tokenDaysRemaining(config: Config, now: Date): number | null {
-  const raw = config.get('canvas_token_expires_at');
+  return daysRemaining(config, 'canvas_token_expires_at', now);
+}
+
+/** Whole days until the expiry recorded under `key`, or null if none is recorded. */
+export function daysRemaining(config: Config, key: 'canvas_token_expires_at' | 'dashboard_read_token_expires_at', now: Date): number | null {
+  const raw = config.get(key);
   if (raw === undefined || raw === '') return null;
   const expiry = new Date(raw);
   if (Number.isNaN(expiry.getTime())) return null;
