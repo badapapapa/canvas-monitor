@@ -52,8 +52,12 @@ interface FakeTurso {
   readOnlyWrite: number | 'blocked' | 'accept';
   /** Writes blocked for EVERY token (a usage limit), with this reason. */
   writesBlocked?: string;
-  /** The reason text on a read-only BLOCKED; the real one is not known, so the default states none. */
-  readOnlyReason?: string;
+  /**
+   * The reason text on a read-only BLOCKED. Turso's names the read-only
+   * permission (the owner's verify run, D-68); its exact wording is never
+   * printed, so the fakes use their own.
+   */
+  readOnlyReason?: string | undefined;
 }
 
 /** How Turso reports a blocked statement: HTTP 200, the error inside the pipeline results. */
@@ -131,7 +135,7 @@ async function verify(opts: { main: string; readModel: string; recorded?: string
 
 const RECORDED = '2026-12-23T12:00:00Z';
 /** As the real Turso behaved (2026-09-24): 401 for a wrong-database token, BLOCKED for a read-only write. */
-const good = (): FakeTurso => ({ tokens: {}, foreign: 401, readOnlyWrite: 'blocked' });
+const good = (): FakeTurso => ({ tokens: {}, foreign: 401, readOnlyWrite: 'blocked', readOnlyReason: 'the token is read-only' });
 const worlds = async (main: Partial<FakeTurso> = {}, readModel: Partial<FakeTurso> = {}) => ({
   main: await fakeTurso({ ...good(), tokens: { [MAIN]: 'rw' }, ...main }),
   readModel: await fakeTurso({ ...good(), tokens: { [WRITE]: 'rw', [READ]: 'ro' }, ...readModel }),
@@ -146,7 +150,7 @@ describe('readmodel verify: only an authorisation refusal is a pass', () => {
     assert.equal(lines(r.out).length, 6);
     assert.ok(lines(r.out).every((l) => l.startsWith('PASS')), r.out);
     assert.match(r.out, /MAIN database: refused \(SERVER_ERROR HTTP 401\)/);
-    assert.match(r.out, /PASS {2}read-only token WRITES to the read model \(a no-op insert\): refused \(BLOCKED; reason not stated\)/);
+    assert.match(r.out, /PASS {2}read-only token WRITES to the read model \(a no-op insert\): refused \(BLOCKED; reason names read-only\)/);
     assert.match(r.out, /control: the write token's identical write succeeded just before/);
     assert.ok(!r.out.includes('Operation was blocked'), 'no error message text is printed');
     assert.match(r.out, /expires 2026-12-23T12:04:31\.000Z/);
@@ -238,11 +242,15 @@ describe('readmodel verify: BLOCKED counts only with the control (D-67)', () => 
     assert.ok(!r.out.includes('quota'), 'the reason text itself is not printed');
   });
 
-  it('says when the reason names the read-only permission', async () => {
-    const w = await worlds({}, { readOnlyReason: 'token is read-only' });
-    const r = await verify({ ...w, recorded: RECORDED });
-    assert.equal(r.code, 0, r.out);
-    assert.match(r.out, /refused \(BLOCKED; reason names read-only\)/);
+  it('FAILS a BLOCKED whose reason does not name the read-only permission, even with a passing control (D-68)', async () => {
+    for (const reason of [undefined, 'maintenance']) {
+      const w = await worlds({}, { readOnlyReason: reason });
+      const r = await verify({ ...w, recorded: RECORDED });
+      assert.equal(r.code, 1, String(reason));
+      assert.match(r.out, /FAIL {2}read-only token WRITES to the read model \(a no-op insert\): blocked, but the reason does not name the read-only permission \(BLOCKED\)/);
+      assert.match(r.out, /control: the write token's identical write succeeded just before/);
+      assert.ok(!r.out.includes('maintenance') && !r.out.includes('Operation was blocked'), 'the reason text is not printed');
+    }
   });
 
 });

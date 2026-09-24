@@ -579,6 +579,13 @@ const MUTATIONS: Mutation[] = [
     tests: [VERIFY],
   },
   {
+    name: 'verify accepting a BLOCKED whose reason does not name the read-only permission',
+    file: 'src/readmodel/cli.ts',
+    from: "    if (probe.blocked !== 'read-only') return {",
+    to: '    if (false) return {',
+    tests: [VERIFY],
+  },
+  {
     name: 'verify accepting a BLOCKED whose reason names a usage limit',
     file: 'src/readmodel/cli.ts',
     from: "  if (probe.blocked === 'usage') {",

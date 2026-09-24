@@ -20,8 +20,10 @@
  *            everyone (a usage limit). So BLOCKED counts only with a CONTROL:
  *            immediately before, the WRITE token sends the IDENTICAL statement
  *            to the read model, and it must succeed. A block on the database
- *            would refuse the control too. And a BLOCKED whose reason names a
- *            limit or quota fails whatever the control says.
+ *            would refuse the control too. And the reason must name the
+ *            read-only permission, as Turso's does (D-68): a BLOCKED whose
+ *            reason names a limit or quota, or names nothing, fails whatever
+ *            the control says. The reason is classified, never printed.
  *              6. the expiry recorded in the main database matches the
  *                 read-only token's own (read from the token; the date only).
  *            Prints PASS/FAIL, HTTP statuses, error codes and that date only --
@@ -121,8 +123,8 @@ export const NO_OP_WRITE = {
 
 /**
  * Check 2's verdict. 401/403 passes on its own. BLOCKED passes only if the
- * write token's identical write succeeded just before, and the reason does not
- * name a usage limit. Anything else fails.
+ * write token's identical write succeeded just before AND the reason names the
+ * read-only permission (D-68). Anything else fails.
  */
 export function readOnlyWriteVerdict(probe: Outcome, control: Outcome): { pass: boolean; got: string; control: string } {
   const controlLine = control.ok
@@ -135,7 +137,8 @@ export function readOnlyWriteVerdict(probe: Outcome, control: Outcome): { pass: 
   }
   if (probe.blocked !== null) {
     if (!control.ok) return { pass: false, got: `blocked, but the control failed (${probe.detail})`, control: controlLine };
-    return { pass: true, got: `refused (${probe.detail}; reason ${probe.blocked === 'read-only' ? 'names read-only' : 'not stated'})`, control: controlLine };
+    if (probe.blocked !== 'read-only') return { pass: false, got: `blocked, but the reason does not name the read-only permission (${probe.detail})`, control: controlLine };
+    return { pass: true, got: `refused (${probe.detail}; reason names read-only)`, control: controlLine };
   }
   return { pass: false, got: `error, not an authorisation refusal (${probe.detail})`, control: controlLine };
 }

@@ -2595,3 +2595,30 @@ replaces them.
 - the local preview sending `upgrade-insecure-requests`;
 - HSTS sent off the production deployment;
 - a production cookie without the `__Host-` prefix.
+
+---
+
+## D-68 — Verify requires Turso's read-only reason · 2026-09-24
+
+The owner's verify run passed all six checks. The write check read
+`refused (BLOCKED; reason names read-only)`, and the control passed. Turso's
+reason for refusing the read-only token's write **does** name the read-only
+permission.
+
+So, at the owner's request, that is now **required**. `BLOCKED` passes only
+when:
+- the write token's identical no-op write to the read model succeeded just
+  before (the control, D-67); **and**
+- the reason names the read-only permission.
+
+A reason that names nothing, or names something else, fails, as does one that
+names a usage limit. The reason is classified, never printed: the output
+shows the code and status only. An HTTP 401 or 403 still passes on its own.
+
+The fake Turso's read-only refusal now carries a reason naming the permission,
+in its own wording, since Turso's exact text is never printed. The tests cover
+a reason naming the permission (pass), no reason at all (fail), a different
+reason (fail), and a usage limit (fail), each with a passing control.
+
+**One new mutation-check entry (86 in total):** accepting a `BLOCKED` whose
+reason does not name the read-only permission.
