@@ -11,11 +11,24 @@
  *   also ends every session.
  * - Verified with Web Crypto's `verify`, a constant-time comparison, so it runs
  *   the same in the proxy and in pages.
- * - The cookie is `__Host-` prefixed: Secure, Path=/, no Domain, so no other
- *   site or subdomain can set or read it. HttpOnly and SameSite=Strict.
+ * - On the production deployment the cookie is `__Host-` prefixed: Secure,
+ *   Path=/, no Domain, so no other site or subdomain can set or read it.
+ *   HttpOnly and SameSite=Strict everywhere.
+ * - The local http:// preview uses `cm_session`, otherwise identical (D-67):
+ *   WebKit (Safari) refuses any `__Host-` cookie from http://localhost, so the
+ *   prefix made Safari sign-in impossible there. The prefix guards against a
+ *   sibling subdomain setting the cookie, which localhost does not have.
  */
 
+import { productionDeployment, type DashboardEnv } from './env.ts';
+
 export const SESSION_COOKIE = '__Host-cm_session';
+export const LOCAL_SESSION_COOKIE = 'cm_session';
+
+/** The session cookie's name: `__Host-` on the production deployment, always. */
+export function sessionCookieName(env: DashboardEnv = process.env): string {
+  return productionDeployment(env) ? SESSION_COOKIE : LOCAL_SESSION_COOKIE;
+}
 export const SESSION_TTL_SECONDS = 30 * 24 * 3600;
 
 /** Proof that a request carried a valid session. Only `verifySession` makes one. */
@@ -93,7 +106,7 @@ export async function verifySession(
 }
 
 /** The Set-Cookie value for a session, or for clearing it. */
-export function sessionCookie(value: string | null): string {
+export function sessionCookie(value: string | null, name: string = sessionCookieName()): string {
   const attrs = 'Path=/; HttpOnly; Secure; SameSite=Strict';
-  return value === null ? `${SESSION_COOKIE}=; ${attrs}; Max-Age=0` : `${SESSION_COOKIE}=${value}; ${attrs}; Max-Age=${SESSION_TTL_SECONDS}`;
+  return value === null ? `${name}=; ${attrs}; Max-Age=0` : `${name}=${value}; ${attrs}; Max-Age=${SESSION_TTL_SECONDS}`;
 }

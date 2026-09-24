@@ -2376,6 +2376,11 @@ else fails and prints its code and status: a timeout, a DNS failure, a 5xx.
   - a write on a read-only token (`NotAuthorized`) is not turned into a
     statement error. It propagates and also answers 401, with a JSON body
     `{"error": ...}`;
+
+    **Corrected by D-67: wrong for the real service.** That is the
+    open-source server. Turso's hosted service answered the read-only write
+    with `BLOCKED`, a statement error at HTTP 200, and this verify failed it.
+    The 401 half holds: the three cross-database checks do answer HTTP 401.
   - `@libsql/client` reports that as `SERVER_ERROR` and keeps the status on
     the error's `cause`. That is what the owner saw.
 - 403 is accepted too, for a proxy in front that answers "forbidden" rather
@@ -2478,3 +2483,115 @@ value already in the real environment**. A scrypt hash is full of `$`.
 
 The mutation-check's scratch copy now also leaves out `dashboard/.env*` and
 `.vercel`, so a local preview's real token is never copied.
+
+---
+
+## D-67 — `BLOCKED`, a control write, and the Safari preview · 2026-09-24
+
+**1. Turso answers a read-only write with `BLOCKED`, not 401** (correcting
+D-66). On the owner's run, verify printed five PASS and one FAIL: the
+read-only token's write came back `BLOCKED`, a statement error at HTTP 200.
+D-66 had predicted 401 from the open-source server, and the fake server had
+modelled that 401, which is why the tests passed.
+
+**Why `BLOCKED` cannot pass on its own.** In the open-source server,
+`BLOCKED` comes from write or read blocks set on the *database*
+(`block_writes`, `block_reads`, with an optional `block_reason`). That is
+what a usage limit looks like. It applies to every token, so it proves
+nothing about the read-only one.
+
+**The control.** Immediately before the read-only probe, the **write** token
+sends the **identical** statement to the **read model**:
+
+    INSERT INTO rm_meta (name, value) VALUES ('schema_version', '1')
+      ON CONFLICT (name) DO NOTHING
+
+- The row exists, so it changes nothing, but the server still classes it as
+  a write. So a block on the database refuses it as well.
+- It uses the read-model URL and write token only. It never reaches the
+  main database.
+- **BLOCKED counts as read-only enforcement only if the control succeeded.**
+  If the control fails, the check fails, and says the write token was refused
+  too.
+- A `BLOCKED` whose reason names a limit, quota, usage, plan, storage,
+  upgrade or suspension fails whatever the control says. A reason that names
+  the read-only permission is reported as such.
+- The reason text is only classified, never printed: the output shows the
+  code and status, and "reason names read-only" or "reason not stated".
+- The real service's reason text for this refusal is not known yet. The
+  owner's next verify run shows how it is classified.
+- An HTTP 401 or 403 still passes on its own.
+
+**Tests.** The fake Turso now answers a read-only write as the real service
+did: HTTP 200, a `BLOCKED` statement error. The tests cover:
+- `BLOCKED` with a passing control: pass;
+- a database-wide block, where the control is refused too: fail, and says so;
+- a usage-limit reason: fail;
+- a reason naming read-only: pass, and says so;
+- 401 and 403: pass.
+
+**2. The preview failed in Safari: `upgrade-insecure-requests`, and the
+`__Host-` cookie.** Confirmed in WebKit, not assumed.
+- **Cause 1.** On a bare page, WebKit follows CSP `upgrade-insecure-requests`
+  to `https://localhost` for a same-origin form POST. Chromium does not.
+  Without the directive, both stay on http. That was Safari's "can't establish
+  a secure connection".
+- **Cause 2, found by the new browser test.** WebKit refuses **any**
+  `__Host-` cookie from `http://localhost`, though it accepts a plain `Secure`
+  one. Chromium accepts both. So even without the upgrade, Safari would have
+  dropped the session cookie and bounced back to `/login`.
+
+**The fix: the local preview only.** Production is unchanged.
+- `Strict-Transport-Security` and `upgrade-insecure-requests` are sent **only**
+  on the production deployment (`VERCEL_ENV=production`), which is always
+  HTTPS. They are never sent on the local http preview, under `vercel dev`,
+  or on a preview deployment's 404s.
+- Before this, the preview did send HSTS over plain http. Browsers must ignore
+  HSTS received over http (RFC 6797 §8.1), and it is now not sent at all.
+- The local preview's cookie is `cm_session`, otherwise identical:
+  HttpOnly, Secure, SameSite=Strict, Path=/. Production keeps
+  `__Host-cm_session`. The prefix guards against a sibling subdomain setting
+  the cookie, and localhost has none.
+- **Tests:**
+  - production sends every header, HSTS and upgrade included, through the
+    real proxy, even with `DASHBOARD_LOCAL` set;
+  - the local preview differs by exactly those two headers;
+  - the production cookie name is `__Host-`, whatever else is set.
+- **Nothing the preview sends can leave a browser upgrading localhost:**
+  - no HSTS;
+  - every response the proxy handles is `no-store`;
+  - its redirects are 303s to `http://localhost` or relative paths;
+  - Next's own trailing-slash 308s point to relative, same-origin paths.
+
+  Safari's address-bar history can still suggest the https address it
+  failed on. Typing `http://` once replaces it.
+
+**3. The smoke test now runs real browser engines.** Playwright 1.63.0 is an
+exact-pinned dev dependency, installed without scripts, with its WebKit and
+Chromium builds. In **both** engines, at `http://localhost`, the smoke test
+checks:
+- redirect to login without a session, and no data;
+- a wrong password refused;
+- sign-in, and the data renders;
+- the cookie is HttpOnly, Secure and Strict, and invisible to scripts;
+- a module page opens, and logout works;
+- every request stayed on `http://localhost`, with no HSTS, no console error
+  and no CSP violation.
+
+Reintroducing `upgrade-insecure-requests` on the local preview makes the
+WebKit run fail, as it should (checked by hand). The smoke test now builds
+and runs a throwaway copy of the dashboard, with no `.env*` file. So it runs
+while the preview's secrets exist, and never touches the preview's build.
+
+`npm run dashboard:preview` now **reuses** an existing preview password and
+`.env.local`, so a rebuild does not change the password. `--new-password`
+replaces them.
+
+**Mutation-check, 7 new entries (85 in total), all caught:**
+- verify accepting `BLOCKED` without the control;
+- verify accepting a usage-limit `BLOCKED`;
+- production without HSTS;
+- production without `upgrade-insecure-requests`;
+- the local preview sending `upgrade-insecure-requests`;
+- HSTS sent off the production deployment;
+- a production cookie without the `__Host-` prefix.

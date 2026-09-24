@@ -10,9 +10,9 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { SESSION_COOKIE, sessionCookie, signSession, verifySession, SESSION_TTL_SECONDS } from '../../dashboard/lib/session.ts';
+import { LOCAL_SESSION_COOKIE, SESSION_COOKIE, sessionCookie, sessionCookieName, signSession, verifySession, SESSION_TTL_SECONDS } from '../../dashboard/lib/session.ts';
 import { hashPassword, verifyPassword } from '../../dashboard/lib/password.ts';
-import { secrets, servingAllowed } from '../../dashboard/lib/env.ts';
+import { productionDeployment, secrets, servingAllowed } from '../../dashboard/lib/env.ts';
 import { contentSecurityPolicy, securityHeaders } from '../../dashboard/lib/headers.ts';
 import { assertReadOnly, WriteRefused } from '../../dashboard/lib/sql-guard.ts';
 import { googleCalendarLink } from '../../dashboard/lib/calendar.ts';
@@ -27,9 +27,11 @@ describe('dashboard session: a signed cookie, nothing stored', () => {
   it('round-trips, and carries the strict cookie attributes', async () => {
     const v = await signSession({ secret: SECRET, passwordHash: HASH_A, nowSeconds: T });
     assert.equal((await verifySession(v, { secret: SECRET, passwordHash: HASH_A, nowSeconds: T + 60 }))?.kind, 'verified-session');
-    const c = sessionCookie(v);
+    const c = sessionCookie(v, SESSION_COOKIE);
     for (const attr of [`${SESSION_COOKIE}=`, 'HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/', `Max-Age=${SESSION_TTL_SECONDS}`]) assert.ok(c.includes(attr), attr);
     assert.ok(SESSION_COOKIE.startsWith('__Host-'));
+    const local = sessionCookie(v, LOCAL_SESSION_COOKIE);
+    assert.equal(local.replace(`${LOCAL_SESSION_COOKIE}=`, ''), c.replace(`${SESSION_COOKIE}=`, ''), 'the local cookie differs by name only');
     assert.ok(!/Domain=/i.test(c));
   });
 
@@ -94,8 +96,11 @@ describe('dashboard environment: data only on the production deployment', () => 
   });
 });
 
+const PROD = { dev: false, production: true };
+const LOCAL = { dev: false, production: false };
+
 describe('dashboard headers', () => {
-  const h = securityHeaders('NONCE123', false);
+  const h = securityHeaders('NONCE123', PROD);
   it('never lets an authenticated response be cached, indexed or framed', () => {
     assert.match(h['Cache-Control']!, /^no-store\b/);
     assert.doesNotMatch(h['Cache-Control']!, /public|max-age=[1-9]/);
@@ -111,12 +116,39 @@ describe('dashboard headers', () => {
   });
 
   it('has a strict CSP: nonce scripts only, no inline, no third-party origin, no framing', () => {
-    const csp = contentSecurityPolicy('NONCE123', false);
+    const csp = contentSecurityPolicy('NONCE123', PROD);
     assert.match(csp, /script-src 'self' 'nonce-NONCE123' 'strict-dynamic'/);
     assert.match(csp, /frame-ancestors 'none'/);
     assert.match(csp, /default-src 'self'/);
     assert.match(csp, /object-src 'none'/);
     assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval|https?:|\*/);
+  });
+
+  it('production sends every header, HSTS and upgrade-insecure-requests included (D-67)', () => {
+    assert.deepEqual(Object.keys(h).sort(), [
+      'Cache-Control', 'Content-Security-Policy', 'Cross-Origin-Opener-Policy', 'Cross-Origin-Resource-Policy', 'Permissions-Policy',
+      'Referrer-Policy', 'Strict-Transport-Security', 'X-Content-Type-Options', 'X-Frame-Options', 'X-Robots-Tag',
+    ]);
+    assert.equal(h['Strict-Transport-Security'], 'max-age=63072000; includeSubDomains');
+    assert.match(h['Content-Security-Policy']!, /; upgrade-insecure-requests$/);
+  });
+
+  it('the local http preview differs by exactly two things: no HSTS, no upgrade-insecure-requests (D-67)', () => {
+    const l = securityHeaders('NONCE123', LOCAL);
+    const { 'Strict-Transport-Security': hsts, 'Content-Security-Policy': prodCsp, ...prodRest } = h;
+    const { 'Content-Security-Policy': localCsp, ...localRest } = l;
+    assert.ok(hsts !== undefined && !('Strict-Transport-Security' in l));
+    assert.deepEqual(localRest, prodRest);
+    assert.equal(localCsp, prodCsp!.replace('; upgrade-insecure-requests', ''));
+    assert.doesNotMatch(localCsp!, /upgrade-insecure-requests/);
+  });
+
+  it('HSTS and upgrade-insecure-requests only on the production deployment, whatever else is set', () => {
+    assert.equal(productionDeployment({ VERCEL: '1', VERCEL_ENV: 'production' }), true);
+    assert.equal(productionDeployment({ VERCEL: '1', VERCEL_ENV: 'production', DASHBOARD_LOCAL: '1' }), true);
+    for (const env of [{}, { DASHBOARD_LOCAL: '1' }, { VERCEL: '1' }, { VERCEL: '1', VERCEL_ENV: 'preview' }, { VERCEL: '1', VERCEL_ENV: 'development' }]) {
+      assert.equal(productionDeployment(env), false, JSON.stringify(env));
+    }
   });
 });
 
@@ -183,6 +215,59 @@ describe('dashboard proxy: no page, no route, no data without a session', () => 
       assert.match(res.headers.get('cache-control') ?? '', /no-store/);
       assert.match(res.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
       assert.match(res.headers.get('x-robots-tag') ?? '', /noindex/);
+    }
+  });
+
+  it('on the production deployment, sends HSTS and upgrade-insecure-requests on every response, even with DASHBOARD_LOCAL set', async () => {
+    process.env['DASHBOARD_LOCAL'] = '1';
+    try {
+      const v = await signSession({ secret: SECRET, passwordHash: HASH_A, nowSeconds: Math.floor(Date.now() / 1000) });
+      for (const res of [await proxy(req('/login')), await proxy(req('/')), await proxy(req('/', `${SESSION_COOKIE}=${v}`)), await proxy(req('/api/x'))]) {
+        assert.equal(res.headers.get('strict-transport-security'), 'max-age=63072000; includeSubDomains');
+        assert.match(res.headers.get('content-security-policy') ?? '', /upgrade-insecure-requests/);
+        for (const k of ['x-frame-options', 'referrer-policy', 'x-content-type-options', 'cross-origin-opener-policy', 'cross-origin-resource-policy', 'permissions-policy']) {
+          assert.ok(res.headers.get(k) !== null, k);
+        }
+      }
+    } finally {
+      delete process.env['DASHBOARD_LOCAL'];
+    }
+  });
+
+  it('on a preview deployment or under `vercel dev`, its 404s carry no HSTS', async () => {
+    try {
+      for (const env of ['preview', 'development']) {
+        process.env['VERCEL_ENV'] = env;
+        const res = await proxy(new NextRequest('http://localhost:3000/'));
+        assert.equal(res.status, 404, env);
+        assert.equal(res.headers.get('strict-transport-security'), null, env);
+        assert.doesNotMatch(res.headers.get('content-security-policy') ?? '', /upgrade-insecure-requests/, env);
+      }
+    } finally {
+      process.env['VERCEL_ENV'] = 'production';
+    }
+  });
+
+  it('in the local http preview, never sends HSTS or upgrade-insecure-requests, and redirects over plain http', async () => {
+    const vercel = { VERCEL: process.env['VERCEL'], VERCEL_ENV: process.env['VERCEL_ENV'] };
+    delete process.env['VERCEL'];
+    delete process.env['VERCEL_ENV'];
+    process.env['DASHBOARD_LOCAL'] = '1';
+    try {
+      const local = (p: string) => new NextRequest(`http://localhost:3100${p}`);
+      for (const p of ['/login', '/', '/m/1', '/api/x']) {
+        const res = await proxy(local(p));
+        assert.equal(res.headers.get('strict-transport-security'), null, p);
+        assert.doesNotMatch(res.headers.get('content-security-policy') ?? '', /upgrade-insecure-requests/, p);
+        assert.match(res.headers.get('cache-control') ?? '', /no-store/, p);
+        const location = res.headers.get('location');
+        if (location !== null) assert.equal(new URL(location).protocol, 'http:', `${p}: a redirect to https`);
+        assert.notEqual(res.status, 301, 'no permanent (cacheable) redirect');
+        assert.notEqual(res.status, 308, 'no permanent (cacheable) redirect');
+      }
+    } finally {
+      delete process.env['DASHBOARD_LOCAL'];
+      Object.assign(process.env, vercel);
     }
   });
 
@@ -333,4 +418,12 @@ describe('dashboard password script: prints secrets, so never in CI', () => {
       assert.doesNotMatch(r.stderr, /scrypt\$|SESSION_SECRET /);
     });
   }
+});
+
+describe('dashboard session cookie name: __Host- on production, always (D-67)', () => {
+  it('production uses the __Host- name, whatever else is set; everything else the local name', () => {
+    assert.equal(sessionCookieName({ VERCEL: '1', VERCEL_ENV: 'production' }), '__Host-cm_session');
+    assert.equal(sessionCookieName({ VERCEL: '1', VERCEL_ENV: 'production', DASHBOARD_LOCAL: '1' }), '__Host-cm_session');
+    assert.equal(sessionCookieName({ DASHBOARD_LOCAL: '1' }), 'cm_session');
+  });
 });

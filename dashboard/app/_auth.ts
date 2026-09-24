@@ -7,14 +7,14 @@
 import { cookies } from 'next/headers';
 import { redirect, notFound } from 'next/navigation';
 import { secrets, servingAllowed, type Secrets } from '../lib/env.ts';
-import { SESSION_COOKIE, verifySession, type VerifiedSession } from '../lib/session.ts';
+import { sessionCookieName, verifySession, type VerifiedSession } from '../lib/session.ts';
 
 /** For pages: a verified session and the secrets, or a redirect to /login. */
 export async function requireSession(): Promise<{ session: VerifiedSession; secrets: Secrets }> {
   if (!servingAllowed()) notFound();
   const s = secrets();
   if (s === null) notFound();
-  const session = await verifySession((await cookies()).get(SESSION_COOKIE)?.value, {
+  const session = await verifySession((await cookies()).get(sessionCookieName())?.value, {
     secret: s.sessionSecret, passwordHash: s.passwordHash, nowSeconds: Math.floor(Date.now() / 1000),
   });
   if (session === null) redirect('/login');
@@ -26,8 +26,9 @@ export async function sessionForRoute(request: Request): Promise<VerifiedSession
   if (!servingAllowed()) return null;
   const s = secrets();
   if (s === null) return null;
-  const cookie = (request.headers.get('cookie') ?? '').split(';').map((c) => c.trim()).find((c) => c.startsWith(`${SESSION_COOKIE}=`));
-  return verifySession(cookie?.slice(SESSION_COOKIE.length + 1), {
+  const name = sessionCookieName();
+  const cookie = (request.headers.get('cookie') ?? '').split(';').map((c) => c.trim()).find((c) => c.startsWith(`${name}=`));
+  return verifySession(cookie?.slice(name.length + 1), {
     secret: s.sessionSecret, passwordHash: s.passwordHash, nowSeconds: Math.floor(Date.now() / 1000),
   });
 }

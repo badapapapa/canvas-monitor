@@ -11,10 +11,17 @@
  *              3. the read-only token is REFUSED by the main database;
  *              4. the write token is REFUSED by the main database;
  *              5. the main database's token is REFUSED by the read model.
- *            A refusal counts only if it is an AUTHORISATION refusal (HTTP 401 or
- *            403, which is how Turso answers both a wrong-database token and a
- *            write on a read-only one). Any other failure -- a network blip, a
- *            server fault, a timeout -- is a FAIL, never a pass (D-66).
+ *            A refusal counts only if it is an AUTHORISATION refusal: HTTP 401 or
+ *            403, which is how Turso answers a wrong-database token. Any other
+ *            failure -- a network blip, a server fault, a timeout -- is a FAIL,
+ *            never a pass (D-66).
+ *            Turso answers a write on the read-only token with BLOCKED (D-67),
+ *            the same code it uses when a database's writes are blocked for
+ *            everyone (a usage limit). So BLOCKED counts only with a CONTROL:
+ *            immediately before, the WRITE token sends the IDENTICAL statement
+ *            to the read model, and it must succeed. A block on the database
+ *            would refuse the control too. And a BLOCKED whose reason names a
+ *            limit or quota fails whatever the control says.
  *              6. the expiry recorded in the main database matches the
  *                 read-only token's own (read from the token; the date only).
  *            Prints PASS/FAIL, HTTP statuses, error codes and that date only --
@@ -67,7 +74,33 @@ function describe(error: unknown): string {
   return [code ?? 'error', status === null ? null : `HTTP ${status}`].filter((x) => x !== null).join(' ');
 }
 
-export type Outcome = { ok: true } | { ok: false; authRefusal: boolean; detail: string };
+/**
+ * What a BLOCKED refusal's reason says, classified here and never printed:
+ * 'usage' (a limit, quota or plan block: never read-only enforcement),
+ * 'read-only' (it names the token's permission), or 'unstated'.
+ */
+export type BlockedReason = 'usage' | 'read-only' | 'unstated';
+
+export function blockedReason(error: unknown): BlockedReason | null {
+  let e: unknown = error;
+  let blocked = false;
+  const texts: string[] = [];
+  for (let depth = 0; depth < 5 && e !== null && typeof e === 'object'; depth += 1) {
+    const x = e as { code?: unknown; message?: unknown; cause?: unknown };
+    if (x.code === 'BLOCKED') blocked = true;
+    if (typeof x.message === 'string') texts.push(x.message);
+    e = x.cause;
+  }
+  if (!blocked) return null;
+  const text = texts.join(' ');
+  if (/quota|limit|usage|exceed|billing|plan\b|storage|upgrade|suspend/i.test(text)) return 'usage';
+  if (/read[- ]?only|readonly|permission|not authori[sz]ed|forbidden|write access/i.test(text)) return 'read-only';
+  return 'unstated';
+}
+
+export type Outcome =
+  | { ok: true }
+  | { ok: false; authRefusal: boolean; blocked: BlockedReason | null; detail: string };
 
 /** Run one request. A failure is an authorisation refusal only if the server answered 401 or 403. */
 export async function attempt(run: () => Promise<unknown>): Promise<Outcome> {
@@ -76,8 +109,35 @@ export async function attempt(run: () => Promise<unknown>): Promise<Outcome> {
     return { ok: true };
   } catch (error) {
     const status = httpStatus(error);
-    return { ok: false, authRefusal: status === 401 || status === 403, detail: describe(error) };
+    return { ok: false, authRefusal: status === 401 || status === 403, blocked: blockedReason(error), detail: describe(error) };
   }
+}
+
+/** The read-only write probe, and its control: the same statement, sent by each token. */
+export const NO_OP_WRITE = {
+  sql: "INSERT INTO rm_meta (name, value) VALUES ('schema_version', ?) ON CONFLICT (name) DO NOTHING",
+  args: [READMODEL_SCHEMA_VERSION],
+};
+
+/**
+ * Check 2's verdict. 401/403 passes on its own. BLOCKED passes only if the
+ * write token's identical write succeeded just before, and the reason does not
+ * name a usage limit. Anything else fails.
+ */
+export function readOnlyWriteVerdict(probe: Outcome, control: Outcome): { pass: boolean; got: string; control: string } {
+  const controlLine = control.ok
+    ? "control: the write token's identical write succeeded just before (it changed nothing)"
+    : `control FAILED: the write token's identical write was refused too (${control.detail}), so writes are blocked for everyone and this proves nothing about the read-only token`;
+  if (probe.ok) return { pass: false, got: 'allowed', control: controlLine };
+  if (probe.authRefusal) return { pass: true, got: `refused (${probe.detail})`, control: controlLine };
+  if (probe.blocked === 'usage') {
+    return { pass: false, got: `blocked, and the reason names a usage limit, not the token (${probe.detail})`, control: controlLine };
+  }
+  if (probe.blocked !== null) {
+    if (!control.ok) return { pass: false, got: `blocked, but the control failed (${probe.detail})`, control: controlLine };
+    return { pass: true, got: `refused (${probe.detail}; reason ${probe.blocked === 'read-only' ? 'names read-only' : 'not stated'})`, control: controlLine };
+  }
+  return { pass: false, got: `error, not an authorisation refusal (${probe.detail})`, control: controlLine };
 }
 
 /** The `exp` claim of a Turso token (a JWT), as a Date; null if it has none. Reads the date, prints nothing. */
@@ -129,24 +189,29 @@ export async function runReadModelCli(ctx: RunContext, action: string | undefine
 
   if (action === 'verify') {
     const read = readModelClient('read');
+    const write = readModelClient('write'); // the control only: the read model, never the main database
     const readOnMain = createClient({ url: env('TURSO_DATABASE_URL'), authToken: env('READMODEL_READ_TOKEN') });
     const writeOnMain = createClient({ url: env('TURSO_DATABASE_URL'), authToken: env('READMODEL_WRITE_TOKEN') });
     const mainOnRead = createClient({ url: env('READMODEL_DATABASE_URL'), authToken: env('TURSO_AUTH_TOKEN') });
 
+    const canRead = await attempt(() => read.execute("SELECT value FROM rm_meta WHERE name = 'schema_version'"));
+    const control = await attempt(() => write.execute(NO_OP_WRITE)); // immediately before the probe
+    const probe = await attempt(() => read.execute(NO_OP_WRITE));
+    const writeVerdict = readOnlyWriteVerdict(probe, control);
     const checks: Array<{ what: string; want: 'allowed' | 'refused'; result: Outcome }> = [
-      { what: 'read-only token reads the read model', want: 'allowed', result: await attempt(() => read.execute("SELECT value FROM rm_meta WHERE name = 'schema_version'")) },
-      {
-        what: 'read-only token WRITES to the read model (a no-op insert)', want: 'refused',
-        result: await attempt(() => read.execute({ sql: "INSERT INTO rm_meta (name, value) VALUES ('schema_version', ?) ON CONFLICT (name) DO NOTHING", args: [READMODEL_SCHEMA_VERSION] })),
-      },
       { what: 'read-only token reaches the MAIN database', want: 'refused', result: await attempt(() => readOnMain.execute('SELECT 1')) },
       { what: 'read-model write token reaches the MAIN database', want: 'refused', result: await attempt(() => writeOnMain.execute('SELECT 1')) },
       { what: 'main database token reaches the read model', want: 'refused', result: await attempt(() => mainOnRead.execute('SELECT 1')) },
     ];
-    for (const c of [read, readOnMain, writeOnMain, mainOnRead]) c.close();
+    for (const c of [read, write, readOnMain, writeOnMain, mainOnRead]) c.close();
 
     let failed = 0;
     out.write('\n');
+    if (!canRead.ok) failed += 1;
+    out.write(`${canRead.ok ? 'PASS' : 'FAIL'}  read-only token reads the read model: ${canRead.ok ? 'allowed' : `refused (${canRead.detail})`}\n`);
+    if (!writeVerdict.pass) failed += 1;
+    out.write(`${writeVerdict.pass ? 'PASS' : 'FAIL'}  read-only token WRITES to the read model (a no-op insert): ${writeVerdict.got}\n`);
+    out.write(`      ${writeVerdict.control}\n`);
     for (const c of checks) {
       const r = c.result;
       let pass: boolean;

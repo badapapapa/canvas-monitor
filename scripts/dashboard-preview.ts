@@ -2,8 +2,12 @@
  * `npm run dashboard:preview` -- step 3 of Phase 8: the dashboard, locally, on
  * the REAL read model (DECISIONS.md D-65, D-66). Run by the owner.
  *
- *   npm run dashboard:preview            set up, build, and self-check
+ *   npm run dashboard:preview            set up (or reuse), build, and self-check
+ *   npm run dashboard:preview -- --new-password   replace the preview password and secrets
  *   npm run dashboard:preview -- --clean remove the preview's secrets file and password
+ *
+ * An existing preview password and dashboard/.env.local are REUSED, so a rebuild
+ * does not change the password you are signing in with.
  *
  * Uses ONLY the read model's READ-ONLY token (READMODEL_DATABASE_URL and
  * READMODEL_READ_TOKEN from .env): never the write token, never the main
@@ -67,24 +71,33 @@ const readToken = (process.env['READMODEL_READ_TOKEN'] ?? '').trim();
 if (url === '' || readToken === '') fail('READMODEL_DATABASE_URL and READMODEL_READ_TOKEN must be in .env.');
 if (!url.startsWith('libsql://')) fail('READMODEL_DATABASE_URL is not a libsql:// URL.');
 
-// A throwaway preview password: 24 characters, no look-alikes, like the real one.
-const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
-const password = Array.from({ length: 24 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
-const sessionSecret = randomBytes(48).toString('base64url');
-const env = {
-  DASHBOARD_LOCAL: '1',
-  READMODEL_DATABASE_URL: url,
-  READMODEL_READ_TOKEN: readToken,
-  DASHBOARD_PASSWORD_HASH: await hashPassword(password),
-  DASHBOARD_SESSION_SECRET: sessionSecret,
-};
-// Next's .env loader expands `$NAME`, and a scrypt hash is full of `$`: escape every one.
-const line = ([k, v]: [string, string]) => `${k}=${v.replaceAll('$', '\\$')}`;
-writeFileSync(ENV_LOCAL, `# Local preview only (npm run dashboard:preview). Gitignored. Remove with --clean.\n${Object.entries(env).map(line).join('\n')}\n`, { mode: 0o600 });
-chmodSync(ENV_LOCAL, 0o600);
-mkdirSync(PASSWORD_DIR, { recursive: true, mode: 0o700 });
-writeFileSync(PASSWORD_FILE, password, { mode: 0o600 });
-chmodSync(PASSWORD_FILE, 0o600);
+const reuse = !process.argv.includes('--new-password') && existsSync(ENV_LOCAL) && existsSync(PASSWORD_FILE);
+let password: string;
+let sessionSecret: string | null = null;
+if (reuse) {
+  password = readFileSync(PASSWORD_FILE, 'utf8').trim();
+  sessionSecret = /^DASHBOARD_SESSION_SECRET=(.+)$/m.exec(readFileSync(ENV_LOCAL, 'utf8'))?.[1] ?? null; // for the leak check only
+  process.stdout.write('Reusing the existing preview password and dashboard/.env.local (--new-password to replace them).\n');
+} else {
+  // A throwaway preview password: 24 characters, no look-alikes, like the real one.
+  const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
+  password = Array.from({ length: 24 }, () => ALPHABET[randomInt(ALPHABET.length)]).join('');
+  sessionSecret = randomBytes(48).toString('base64url');
+  const env = {
+    DASHBOARD_LOCAL: '1',
+    READMODEL_DATABASE_URL: url,
+    READMODEL_READ_TOKEN: readToken,
+    DASHBOARD_PASSWORD_HASH: await hashPassword(password),
+    DASHBOARD_SESSION_SECRET: sessionSecret,
+  };
+  // Next's .env loader expands `$NAME`, and a scrypt hash is full of `$`: escape every one.
+  const line = ([k, v]: [string, string]) => `${k}=${v.replaceAll('$', '\\$')}`;
+  writeFileSync(ENV_LOCAL, `# Local preview only (npm run dashboard:preview). Gitignored. Remove with --clean.\n${Object.entries(env).map(line).join('\n')}\n`, { mode: 0o600 });
+  chmodSync(ENV_LOCAL, 0o600);
+  mkdirSync(PASSWORD_DIR, { recursive: true, mode: 0o700 });
+  writeFileSync(PASSWORD_FILE, password, { mode: 0o600 });
+  chmodSync(PASSWORD_FILE, 0o600);
+}
 
 for (const file of [ENV_LOCAL, PASSWORD_FILE]) {
   if (spawnSync('git', ['check-ignore', '-q', file], { cwd: ROOT }).status !== 0) fail('a preview secrets file is NOT gitignored; stopping.');
@@ -120,7 +133,7 @@ try {
     headers: { origin: base, 'content-type': 'application/x-www-form-urlencoded' },
   });
   const cookie = (login.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
-  if (!cookie.startsWith('__Host-cm_session=')) fail(`sign-in failed (status ${login.status}).`);
+  if (!cookie.startsWith('cm_session=')) fail(`sign-in failed (status ${login.status}).`); // the local name (D-67)
 
   const home = await get('/', cookie);
   const html = await home.text();
@@ -134,7 +147,7 @@ try {
     statuses.push(page.status === 200 && !body.includes('data is unavailable') ? 200 : page.status === 200 ? 503 : page.status);
   }
   const bad = statuses.filter((s) => s !== 200).length;
-  const leaked = [readToken, sessionSecret, password].some((s) => html.includes(s) || logs.includes(s));
+  const leaked = [readToken, sessionSecret, password].some((s) => s !== null && (html.includes(s) || logs.includes(s)));
   if (leaked) fail('a secret appeared in a page or the server log.');
   if (bad > 0) fail(`${bad} of ${moduleIds.length} module pages did not render.`);
 

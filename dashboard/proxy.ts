@@ -15,15 +15,15 @@
  */
 
 import { NextResponse, type NextRequest } from 'next/server.js';
-import { secrets, servingAllowed } from './lib/env.ts';
+import { productionDeployment, secrets, servingAllowed } from './lib/env.ts';
 import { newNonce, securityHeaders } from './lib/headers.ts';
-import { SESSION_COOKIE, verifySession } from './lib/session.ts';
+import { sessionCookieName, verifySession } from './lib/session.ts';
 
 const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/login', '/api/login']);
 
 export async function proxy(request: NextRequest): Promise<Response> {
   const nonce = newNonce();
-  const headers = securityHeaders(nonce, process.env.NODE_ENV === 'development');
+  const headers = securityHeaders(nonce, { dev: process.env.NODE_ENV === 'development', production: productionDeployment() });
   const finish = (res: Response): Response => {
     for (const [k, v] of Object.entries(headers)) res.headers.set(k, v);
     return res;
@@ -34,7 +34,7 @@ export async function proxy(request: NextRequest): Promise<Response> {
   if (s === null) return finish(new NextResponse('Not configured', { status: 503 }));
 
   const path = request.nextUrl.pathname;
-  const session = await verifySession(request.cookies.get(SESSION_COOKIE)?.value, {
+  const session = await verifySession(request.cookies.get(sessionCookieName())?.value, {
     secret: s.sessionSecret, passwordHash: s.passwordHash, nowSeconds: Math.floor(Date.now() / 1000),
   });
 

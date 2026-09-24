@@ -12,9 +12,22 @@
  *   no-referrer, browsers send `Origin: null` on every POST, even same-origin
  *   ones (Fetch standard), and the login's CSRF check would refuse them all
  *   (D-66; found in a real browser, not by fetch-based tests).
+ * - Strict-Transport-Security and CSP upgrade-insecure-requests: on the
+ *   production deployment only, which is always HTTPS (D-67). The local
+ *   preview is plain http://localhost, and WebKit (Safari) applies
+ *   upgrade-insecure-requests to localhost: its login form went to
+ *   https://localhost and failed. Everywhere else both are left out, and
+ *   nothing else changes, so HSTS is never sent over plain HTTP or on localhost.
  */
 
-export function contentSecurityPolicy(nonce: string, dev: boolean): string {
+export interface HeaderMode {
+  /** `next dev`: React needs eval and inline styles. */
+  dev: boolean;
+  /** The production deployment (lib/env.ts productionDeployment): the only one given HSTS and upgrade-insecure-requests. */
+  production: boolean;
+}
+
+export function contentSecurityPolicy(nonce: string, { dev, production }: HeaderMode): string {
   return [
     "default-src 'self'",
     `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${dev ? " 'unsafe-eval'" : ''}`,
@@ -26,13 +39,13 @@ export function contentSecurityPolicy(nonce: string, dev: boolean): string {
     "base-uri 'none'",
     "form-action 'self'",
     "frame-ancestors 'none'",
-    'upgrade-insecure-requests',
+    ...(production ? ['upgrade-insecure-requests'] : []),
   ].join('; ');
 }
 
-export function securityHeaders(nonce: string, dev: boolean): Record<string, string> {
+export function securityHeaders(nonce: string, mode: HeaderMode): Record<string, string> {
   return {
-    'Content-Security-Policy': contentSecurityPolicy(nonce, dev),
+    'Content-Security-Policy': contentSecurityPolicy(nonce, mode),
     'Cache-Control': 'no-store, max-age=0',
     'X-Robots-Tag': 'noindex, nofollow, noarchive',
     'Referrer-Policy': 'same-origin',
@@ -41,7 +54,7 @@ export function securityHeaders(nonce: string, dev: boolean): Record<string, str
     'Cross-Origin-Opener-Policy': 'same-origin',
     'Cross-Origin-Resource-Policy': 'same-origin',
     'Permissions-Policy': 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()',
-    'Strict-Transport-Security': 'max-age=63072000; includeSubDomains',
+    ...(mode.production ? { 'Strict-Transport-Security': 'max-age=63072000; includeSubDomains' } : {}),
   };
 }
 

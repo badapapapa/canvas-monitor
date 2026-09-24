@@ -16,8 +16,21 @@ export interface DashboardEnv {
 }
 
 export function servingAllowed(env: DashboardEnv = process.env): boolean {
-  if (env.VERCEL_ENV !== undefined || env.VERCEL !== undefined) return env.VERCEL_ENV === 'production';
+  if (onVercel(env)) return env.VERCEL_ENV === 'production';
   return env.DASHBOARD_LOCAL === '1';
+}
+
+function onVercel(env: DashboardEnv): boolean {
+  return env.VERCEL_ENV !== undefined || env.VERCEL !== undefined;
+}
+
+/**
+ * The production deployment: the only place that is always HTTPS, so the only
+ * one sent HSTS and upgrade-insecure-requests (lib/headers.ts, D-67). Not the
+ * local http:// preview, not `vercel dev`, not a preview deployment's 404s.
+ */
+export function productionDeployment(env: DashboardEnv = process.env): boolean {
+  return onVercel(env) && env.VERCEL_ENV === 'production';
 }
 
 export interface Secrets {
