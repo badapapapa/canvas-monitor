@@ -2622,3 +2622,33 @@ reason (fail), and a usage limit (fail), each with a passing control.
 
 **One new mutation-check entry (86 in total):** accepting a `BLOCKED` whose
 reason does not name the read-only permission.
+
+---
+
+## D-69 — The password script's `--clipboard` mode · 2026-09-24
+
+For the Vercel setup, the owner asked that secrets be entered "without
+appearing on screen where avoidable".
+`node dashboard/scripts/hash-password.ts --clipboard` generates:
+- the password, unless `--own` is given;
+- its hash;
+- a session secret.
+
+It puts each on the clipboard in turn (`pbcopy`). The owner pastes it where
+it goes and presses Enter for the next. **None is printed.** The clipboard
+is cleared at the end, and on Ctrl-C. It is still refused under CI or on
+Vercel.
+
+Trade-off, stated plainly: while a value is on the clipboard, any app that
+reads the clipboard can see it. So can Universal Clipboard, which reaches the
+owner's own nearby Apple devices when Handoff is on. That is for seconds, and
+it is cleared afterwards. The default mode, which prints, remains.
+
+A test runs it against a fake `pbcopy` and checks:
+- three values were copied: a password, its hash (verified), and a 64-character
+  secret;
+- none of them appears in the output;
+- the clipboard was cleared.
+
+**Two mutation-check entries (88 in total):** printing a value in clipboard
+mode, and not clearing the clipboard.

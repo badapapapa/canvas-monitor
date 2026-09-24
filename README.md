@@ -262,7 +262,7 @@ model. The dashboard holds a read-only token for that database alone.
 | `npm run readmodel -- migrate` | Create the read model's tables (write token). |
 | `npm run readmodel -- verify` | Prove the token separation against Turso, and the recorded expiry. All six checks must pass before deploying. |
 | `npm run readmodel -- publish` | Publish once now (the sync does it every run). |
-| `node dashboard/scripts/hash-password.ts` | Generate the dashboard password, its hash and the session secret. |
+| `node dashboard/scripts/hash-password.ts --clipboard` | Generate the dashboard password, its hash and the session secret, one at a time on the clipboard, printing none of them. Without `--clipboard` they are printed. |
 | `npm run dashboard:smoke` | Build a copy of the dashboard and check it on invented data: over HTTP, and the whole login flow in WebKit (Safari) and Chromium. Needs `npx playwright install webkit chromium` once. |
 | `npm run dashboard:preview` | The dashboard locally on the real read model (read-only token, throwaway password), self-checked. Serve it with `npm --prefix dashboard run start -- -p 3100 -H localhost`, open http://localhost:3100, and paste `pbcopy < var/dashboard-preview/password`. `-- --clean` removes its secrets. |
 

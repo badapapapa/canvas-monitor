@@ -628,6 +628,20 @@ const MUTATIONS: Mutation[] = [
     tests: [DASHBOARD],
   },
   {
+    name: 'the password script printing a secret in --clipboard mode',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: 'process.stdout.write(`\\nCopied ${what}.\\nPress Enter when done.\\n`);',
+    to: 'process.stdout.write(`\\nCopied ${what}: ${value}.\\nPress Enter when done.\\n`);',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script leaving the last secret on the clipboard',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: "  const clear = () => { try { copy(''); } catch { /* nothing to clear */ } };",
+    to: '  const clear = () => {};',
+    tests: [DASHBOARD],
+  },
+  {
     name: 'the password script printing secrets under CI',
     file: 'dashboard/scripts/hash-password.ts',
     from: "if (process.env['CI'] !== undefined || process.env['GITHUB_ACTIONS'] !== undefined || process.env['VERCEL'] !== undefined) {",

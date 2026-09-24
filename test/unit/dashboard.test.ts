@@ -427,3 +427,32 @@ describe('dashboard session cookie name: __Host- on production, always (D-67)', 
     assert.equal(sessionCookieName({ DASHBOARD_LOCAL: '1' }), 'cm_session');
   });
 });
+
+describe('dashboard password script --clipboard: prints nothing secret (D-69)', () => {
+  it('puts the password, hash and secret on the clipboard in turn, prints none of them, then clears it', async () => {
+    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const dir = mkdtempSync(path.join(tmpdir(), 'pbcopy-'));
+    try {
+      const capture = path.join(dir, 'capture');
+      writeFileSync(path.join(dir, 'pbcopy'), `#!/bin/sh\ncat >> "${capture}"\nprintf '\\n--END--\\n' >> "${capture}"\n`);
+      chmodSync(path.join(dir, 'pbcopy'), 0o755);
+      const r = spawnSync(process.execPath, [path.join(DASH, 'scripts/hash-password.ts'), '--clipboard'], {
+        encoding: 'utf8', input: '\n\n\n', env: { PATH: `${dir}:${process.env['PATH'] ?? ''}` },
+      });
+      assert.equal(r.status, 0, r.stderr);
+      const copied = readFileSync(capture, 'utf8').split('\n--END--\n').slice(0, -1);
+      assert.equal(copied.length, 4, 'password, hash, secret, then a cleared clipboard');
+      const [password, hash, secret, cleared] = copied as [string, string, string, string];
+      assert.equal(cleared, '');
+      assert.ok(await verifyPassword(password, hash), 'the hash is of that password');
+      assert.equal(secret.length, 64);
+      for (const v of [password, hash, secret]) {
+        assert.ok(!r.stdout.includes(v) && !r.stderr.includes(v), 'a secret was printed');
+      }
+      assert.match(r.stdout, /Clipboard cleared/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
