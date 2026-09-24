@@ -5,7 +5,10 @@
  * - Content-Security-Policy with a per-request nonce: scripts only from this
  *   origin with that nonce, no inline anything else, no third-party origin at
  *   all (no fonts, analytics or CDNs), frame-ancestors 'none'.
- * - Cache-Control: no-store, so no browser, proxy or CDN keeps a copy.
+ * - Cache-Control: exactly what Next.js sends for a dynamic page, and what the
+ *   live site was seen sending (D-71): `private, no-cache, no-store, max-age=0,
+ *   must-revalidate`. No browser, proxy or CDN keeps a copy. The same value on
+ *   every response, API routes included, so there is one to test.
  * - X-Robots-Tag: noindex, nofollow.
  * - Referrer-Policy: same-origin, so a click to Canvas, OneDrive or Google
  *   Calendar does not reveal the dashboard's address. NOT no-referrer: under
@@ -19,6 +22,8 @@
  *   https://localhost and failed. Everywhere else both are left out, and
  *   nothing else changes, so HSTS is never sent over plain HTTP or on localhost.
  */
+
+export const CACHE_CONTROL = 'private, no-cache, no-store, max-age=0, must-revalidate';
 
 export interface HeaderMode {
   /** `next dev`: React needs eval and inline styles. */
@@ -46,7 +51,7 @@ export function contentSecurityPolicy(nonce: string, { dev, production }: Header
 export function securityHeaders(nonce: string, mode: HeaderMode): Record<string, string> {
   return {
     'Content-Security-Policy': contentSecurityPolicy(nonce, mode),
-    'Cache-Control': 'no-store, max-age=0',
+    'Cache-Control': CACHE_CONTROL,
     'X-Robots-Tag': 'noindex, nofollow, noarchive',
     'Referrer-Policy': 'same-origin',
     'X-Content-Type-Options': 'nosniff',

@@ -107,7 +107,7 @@ try {
   assert.doesNotMatch(plain.headers.get('content-security-policy') ?? '', /upgrade-insecure-requests/, 'upgrade-insecure-requests on the local preview');
   const get = (p: string, cookie?: string) => fetch(`${base}${p}`, { redirect: 'manual', headers: cookie === undefined ? {} : { cookie } });
   const checkHeaders = (res: Response, what: string) => {
-    assert.match(res.headers.get('cache-control') ?? '', /no-store/, `${what}: cache-control`);
+    assert.equal(res.headers.get('cache-control'), 'private, no-cache, no-store, max-age=0, must-revalidate', `${what}: cache-control (as production sends it)`);
     assert.match(res.headers.get('x-robots-tag') ?? '', /noindex/, `${what}: x-robots-tag`);
     assert.match(res.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/, `${what}: csp`);
     assert.equal(res.headers.get('x-powered-by'), null, `${what}: x-powered-by`);
@@ -122,7 +122,11 @@ try {
     assert.ok(!body.includes(MARKER) && !body.includes('Invented'), `${p}: data before login`);
     checkHeaders(res, p);
   }
-  for (const p of ['/api/logout', '/api/whatever']) assert.equal((await get(p)).status, 401, p);
+  for (const p of ['/api/logout', '/api/whatever']) {
+    const res = await get(p);
+    assert.equal(res.status, 401, p);
+    checkHeaders(res, p);
+  }
 
   const loginPage = await get('/login');
   assert.equal(loginPage.status, 200);
@@ -136,6 +140,7 @@ try {
   const wrong = await post('not-the-password');
   assert.equal(wrong.headers.get('location'), '/login?e=1', `wrong password: status ${wrong.status}, body ${(await wrong.clone().text()).slice(0, 80)}`);
   assert.equal(wrong.headers.get('set-cookie'), null);
+  checkHeaders(wrong, 'a refused login');
   assert.equal((await post(PASSWORD, 'https://evil.example.test')).status, 403, 'cross-site login');
   const right = await post(PASSWORD);
   const setCookie = right.headers.get('set-cookie') ?? '';
@@ -144,6 +149,7 @@ try {
   assert.ok(setCookie.startsWith('cm_session='), 'the local session cookie name');
   for (const attr of ['HttpOnly', 'Secure', 'SameSite=Strict', 'Path=/']) assert.ok(setCookie.includes(attr), attr);
   const cookie = setCookie.split(';')[0]!;
+  checkHeaders(right, 'a successful login');
 
   const home = await get('/', cookie);
   assert.equal(home.status, 200);

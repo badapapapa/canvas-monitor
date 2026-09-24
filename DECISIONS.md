@@ -2708,3 +2708,158 @@ D-65 and the owner's step-4 brief.
 
 `vercel.json` keeps `git.deploymentEnabled` (main only) as a guard, in case a
 Git connection is ever added by mistake.
+
+---
+
+## D-71 — Phase 8 is live: as built, what the Vercel CLI did on its own, and the fixes · 2026-09-25
+
+**Live, as the owner set it up (2026-09-24/25):**
+- **Deployment:** Vercel CLI `59.19.1`, deployed from `dashboard/`. The
+  project's name, and so its address, is kept out of this public repository. The build log shows `npm ci --ignore-scripts`. No Git
+  repository is connected, and no Vercel GitHub app is installed (D-70). Older
+  deployments are deleted; only the current production one remains.
+- **Deployment Protection:** Vercel Authentication, scope All Deployments.
+  Protection Bypass for Automation, Shareable Links and the OPTIONS Allowlist
+  are all off.
+- **Variables:** four, each Production-only and Sensitive. Sign-in works with
+  the password from the owner's password manager.
+- **Rate limit:** one WAF rule. Fixed window, 60 s, 5 requests per IP, 429,
+  on Request Path equals `/api/login`, **for all methods**. The owner left out
+  the POST condition. That is at least as strict, since `GET /api/login` is
+  405 anyway. The sixth wrong attempt was refused.
+- **Live checks:** 14 of 15 passed. The one failure was the check's fault, not
+  the site's: it required Cache-Control to *start* with `no-store`, and
+  production sends `private, no-cache, no-store, max-age=0, must-revalidate`
+  (fixed below). The rest:
+  - the cookie is `__Host-cm_session`: Secure, HttpOnly, SameSite Strict,
+    Path `/`, 30 days;
+  - a preview deployment served "Not found" on `/`, `/login` and `/m/1`;
+  - Safari on the owner's phone works end to end.
+- **The CLI is logged out.**
+- **The Vercel account signs in with email plus Vercel's own two-factor**, not
+  with GitHub as planned. So there are two identities, each with its own
+  two-factor. The email inbox is now part of the Vercel account's recovery
+  path. GitHub no longer guards Vercel, and Vercel still has no reach into
+  GitHub.
+
+**1. `vercel link` downloaded a Vercel OIDC token and wrote a `.gitignore`.**
+- **What happened:**
+  - After `link`, the CLI asks "Pull development environment variables into
+    .env.local?", defaulting to yes.
+  - Every variable of ours is Production-only, so the only Development value
+    was Vercel's own `VERCEL_OIDC_TOKEN`. It went into `dashboard/.env.local`,
+    and the CLI created `dashboard/.gitignore` to ignore it.
+  - The owner deleted both. The token was never deployed: the CLI's own upload
+    rules and our `.vercelignore` both exclude `.env*`.
+- **What it grants:**
+  - It is a development OIDC token: a signed JWT naming the account, the
+    project, the environment and the user. Per Vercel's docs it expires
+    after 12 hours, so it has expired.
+  - It is worth something only to a service configured to trust it. Nothing
+    in this system is: no cloud account, no Blob store, no KMS.
+  - Vercel's AI Gateway does accept these tokens, so for its 12 hours it could
+    have spent any AI Gateway allowance on the account.
+  - It cannot reach the dashboard, the read model, the main database or
+    GitHub.
+- **Prevention:**
+  - OIDC federation cannot be switched off per project; Vercel offers only an
+    issuer-mode choice.
+  - So the README's redeploy steps never run `link` again: `dashboard/.vercel/`
+    already holds the link, IDs only. If a re-link is ever needed, the answer
+    to the pull prompt is No.
+  - After each redeploy, the steps check that no `.env*` file exists in
+    `dashboard/` and that `git status` is clean.
+  - A committed `dashboard/.gitignore` already lists `.vercel` and `.env*`, so
+    the CLI finds nothing to add (tested).
+
+**2. The CLI tried to install a Claude Code plugin.** Read from the CLI's own
+code (`59.19.1`, in the npx cache), and from the files it keeps, read-only:
+- **What it tries:** after some commands, including `env add`, it runs
+  `claude plugins install vercel@claude-plugins-official`, spawning the
+  Claude Code CLI. That would add Vercel's plugin (skills, and possibly hooks
+  or MCP servers) to Claude Code, which works in this repository. It also
+  fetches a version file from `raw.githubusercontent.com/vercel/vercel-plugin`.
+- **How it decides Claude Code is here:**
+  - an agent's environment variable (`CLAUDECODE`, `CLAUDE_CODE`, …); or
+  - a `~/.claude/projects/<this directory>` folder, which exists because this
+    repository has been worked on with Claude Code.
+- **Why it did not ask:**
+  - It prompts only on an interactive terminal, and piped `env add` input is
+    not one.
+  - But its preferences file
+    (`~/Library/Application Support/com.vercel.cli/agent-preferences.json`)
+    said `"pluginAutoUpdate": true`. That was set when a prompt was accepted on
+    2026-08-24, in an earlier Vercel CLI session, and it means "install without
+    asking".
+- **What happened:** it tried at 2026-09-24T16:27Z and **failed**, because
+  there is no `claude` command on this Mac's PATH.
+- **Nothing was installed:**
+  - `~/.claude/plugins/` is unchanged since 2026-08-30. It has no
+    `installed_plugins.json`, and its only marketplace is the official one,
+    added 2026-08-17.
+  - `~/.claude/settings.json` (unchanged since 2026-09-10) and `~/.claude.json`
+    contain no mention of Vercel, no enabled plugins and no MCP servers.
+  - Everything in `~/.claude` changed since the deploy is Claude Code's own:
+    session files, backups, file history, caches, telemetry.
+  - The Vercel CLI config folder holds no `auth.json` (logged out).
+- **How to stop it:** the only switch it honours is its preferences file,
+  with `pluginDeclined: true` and `pluginAutoUpdate: false`. There is no
+  environment variable. The README gives a one-time command that sets both,
+  keeping the other fields, plus a check.
+
+**3. The password script: only the password touches the clipboard.** D-69's
+`--clipboard` flow had a trap: copying the next command replaced the secret on
+the clipboard. It is replaced by `--vercel`:
+- **Checks first:** dashboard/ must be linked and the CLI logged in, before a
+  password exists. So a failure never strands a saved password.
+- **The password** goes on the clipboard for the password manager. After Enter
+  the clipboard is cleared, and nothing goes to Vercel before that.
+- **The hash and a fresh session secret** go straight into
+  `vercel env add NAME production --sensitive --force`, on its **stdin**:
+  - never on the clipboard, never printed;
+  - never in argv, which `ps` shows;
+  - run in `dashboard/` with `npm_config_ignore_scripts=true`.
+- **`--session-only`** sets a new session secret alone. That is the revocation
+  path.
+- **If Vercel refuses a value,** the script stops and says so, without
+  printing the value.
+- The Vercel CLI version is a constant in the script, and a test keeps the
+  README's pin equal to it.
+- **Tests** run a copy of the script against a fake `npx` and a fake `pbcopy`.
+  They check:
+  - only the password, then an empty value, reached the clipboard;
+  - the hash (verified against the password) and the secret arrived on
+    stdin;
+  - none of the three appears in argv or in the script's output;
+  - the flags are `--sensitive --force`, the working directory is
+    `dashboard/`, and install scripts are off;
+  - it refuses when not linked or not logged in, sends nothing if input ends
+    early, and stops on a refusal.
+
+**4. Cache-Control is what production sends, exactly.**
+- Next.js sends `private, no-cache, no-store, max-age=0, must-revalidate` for
+  a dynamic page, and that is what the live site sent. The proxy now sets the
+  same value on every response, as do the login and logout routes, so there
+  is one value to test.
+- The unit tests assert it exactly. The smoke test asserts it on pages,
+  redirects, 401s and both login outcomes, on the real production build.
+- The README's live check now accepts `no-store` anywhere in the header, and
+  still fails on `public`.
+
+**5. Add-to-calendar on iPhone: proposed, not built.** Tapping it opens the
+Google Calendar app, which drops the event's details. See the owner's
+decision, to be recorded when made.
+
+**Mutation-check:**
+- D-69's two clipboard entries are replaced by six:
+  - the hash put on the clipboard;
+  - a secret passed in argv;
+  - a variable added without `--sensitive`;
+  - install scripts allowed;
+  - no login check before making a password;
+  - the password left on the clipboard.
+- 92 in total, all caught. The scratch copy now includes `README.md`, for the
+  pin test.
+
+**The README** now has "Where every secret lives" (the table as live),
+"Checking the live site", and revised redeploy, revocation and rotation steps.

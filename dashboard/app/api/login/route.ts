@@ -9,6 +9,7 @@ import { secrets, servingAllowed } from '../../../lib/env.ts';
 import { verifyPassword } from '../../../lib/password.ts';
 import { sessionCookie, signSession } from '../../../lib/session.ts';
 import { sameOrigin } from '../../../lib/origin.ts';
+import { CACHE_CONTROL } from '../../../lib/headers.ts';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,7 +17,7 @@ export const dynamic = 'force-dynamic';
 const FAILURE_FLOOR_MS = 1000;
 
 function seeOther(location: string, extra: Record<string, string> = {}): Response {
-  return new Response(null, { status: 303, headers: { Location: location, 'Cache-Control': 'no-store', ...extra } });
+  return new Response(null, { status: 303, headers: { Location: location, 'Cache-Control': CACHE_CONTROL, ...extra } });
 }
 
 export async function POST(request: Request): Promise<Response> {

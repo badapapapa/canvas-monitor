@@ -8,6 +8,8 @@ import { strict as assert } from 'node:assert';
 import { after, before, describe, it } from 'node:test';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+
+const VERCEL_CLI_PIN = /export const VERCEL_CLI = '([^']+)'/.exec(readFileSync(new URL('../../dashboard/scripts/hash-password.ts', import.meta.url), 'utf8'))![1]!;
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { LOCAL_SESSION_COOKIE, SESSION_COOKIE, sessionCookie, sessionCookieName, signSession, verifySession, SESSION_TTL_SECONDS } from '../../dashboard/lib/session.ts';
@@ -102,7 +104,8 @@ const LOCAL = { dev: false, production: false };
 describe('dashboard headers', () => {
   const h = securityHeaders('NONCE123', PROD);
   it('never lets an authenticated response be cached, indexed or framed', () => {
-    assert.match(h['Cache-Control']!, /^no-store\b/);
+    // What production actually sends (seen live, D-71), and what Next sends for a dynamic page.
+    assert.equal(h['Cache-Control'], 'private, no-cache, no-store, max-age=0, must-revalidate');
     assert.doesNotMatch(h['Cache-Control']!, /public|max-age=[1-9]/);
     assert.match(h['X-Robots-Tag']!, /noindex/);
     assert.match(h['X-Robots-Tag']!, /nofollow/);
@@ -212,7 +215,7 @@ describe('dashboard proxy: no page, no route, no data without a session', () => 
     const home = await proxy(req('/', `${SESSION_COOKIE}=${v}`));
     assert.equal(home.headers.get('x-middleware-next'), '1');
     for (const res of [login, home, await proxy(req('/'))]) {
-      assert.match(res.headers.get('cache-control') ?? '', /no-store/);
+      assert.equal(res.headers.get('cache-control'), 'private, no-cache, no-store, max-age=0, must-revalidate');
       assert.match(res.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
       assert.match(res.headers.get('x-robots-tag') ?? '', /noindex/);
     }
@@ -259,7 +262,7 @@ describe('dashboard proxy: no page, no route, no data without a session', () => 
         const res = await proxy(local(p));
         assert.equal(res.headers.get('strict-transport-security'), null, p);
         assert.doesNotMatch(res.headers.get('content-security-policy') ?? '', /upgrade-insecure-requests/, p);
-        assert.match(res.headers.get('cache-control') ?? '', /no-store/, p);
+        assert.equal(res.headers.get('cache-control'), 'private, no-cache, no-store, max-age=0, must-revalidate', p);
         const location = res.headers.get('location');
         if (location !== null) assert.equal(new URL(location).protocol, 'http:', `${p}: a redirect to https`);
         assert.notEqual(res.status, 301, 'no permanent (cacheable) redirect');
@@ -355,6 +358,11 @@ describe('dashboard code: structural guarantees', () => {
     assert.deepEqual(withScripts, [], 'a dependency now declares an install script: decide whether the build needs it (D-66)');
   });
 
+  it('dashboard/.gitignore already ignores what the Vercel CLI would add (D-71)', () => {
+    const lines = readFileSync(path.join(DASH, '.gitignore'), 'utf8').split('\n').map((l) => l.trim());
+    for (const entry of ['.vercel', '.env*']) assert.ok(lines.includes(entry), entry);
+  });
+
   it('never uploads a local .env file in a CLI deploy (.vercelignore)', () => {
     const ignore = readFileSync(path.join(DASH, '.vercelignore'), 'utf8').split('\n').map((l) => l.trim());
     assert.ok(ignore.includes('.env*'));
@@ -428,31 +436,116 @@ describe('dashboard session cookie name: __Host- on production, always (D-67)', 
   });
 });
 
-describe('dashboard password script --clipboard: prints nothing secret (D-69)', () => {
-  it('puts the password, hash and secret on the clipboard in turn, prints none of them, then clears it', async () => {
-    const { mkdtempSync, writeFileSync, chmodSync, rmSync } = await import('node:fs');
+describe('dashboard password script --vercel: the password on the clipboard only; hash and secret piped into Vercel (D-71)', () => {
+  const FAKE_NPX = `#!/bin/sh
+printf 'ARGS:%s\\n' "$*" >> "$CAP"
+printf 'CWD:%s\\n' "$PWD" >> "$CAP"
+printf 'IGNORE_SCRIPTS:%s\\n' "$npm_config_ignore_scripts" >> "$CAP"
+if [ "$3" = "whoami" ]; then [ "$FAKE_LOGGED_IN" = "1" ] && exit 0; exit 1; fi
+printf 'STDIN:' >> "$CAP"; cat >> "$CAP"; printf '\\n--END--\\n' >> "$CAP"
+[ "$FAKE_ADD_FAILS" = "1" ] && { echo "Error: something went wrong" >&2; exit 1; }
+exit 0
+`;
+  const FAKE_PBCOPY = `#!/bin/sh
+cat >> "$CLIP"; printf '\\n--END--\\n' >> "$CLIP"
+`;
+
+  interface Run { status: number | null; stdout: string; stderr: string; npx: string; clipboard: string[]; dash: string }
+  async function run(args: string[], opts: { linked?: boolean; loggedIn?: boolean; addFails?: boolean; input?: string } = {}): Promise<Run> {
+    const { mkdtempSync, writeFileSync, chmodSync, mkdirSync, copyFileSync, existsSync, realpathSync } = await import('node:fs');
     const { tmpdir } = await import('node:os');
-    const dir = mkdtempSync(path.join(tmpdir(), 'pbcopy-'));
-    try {
-      const capture = path.join(dir, 'capture');
-      writeFileSync(path.join(dir, 'pbcopy'), `#!/bin/sh\ncat >> "${capture}"\nprintf '\\n--END--\\n' >> "${capture}"\n`);
-      chmodSync(path.join(dir, 'pbcopy'), 0o755);
-      const r = spawnSync(process.execPath, [path.join(DASH, 'scripts/hash-password.ts'), '--clipboard'], {
-        encoding: 'utf8', input: '\n\n\n', env: { PATH: `${dir}:${process.env['PATH'] ?? ''}` },
-      });
-      assert.equal(r.status, 0, r.stderr);
-      const copied = readFileSync(capture, 'utf8').split('\n--END--\n').slice(0, -1);
-      assert.equal(copied.length, 4, 'password, hash, secret, then a cleared clipboard');
-      const [password, hash, secret, cleared] = copied as [string, string, string, string];
-      assert.equal(cleared, '');
-      assert.ok(await verifyPassword(password, hash), 'the hash is of that password');
-      assert.equal(secret.length, 64);
-      for (const v of [password, hash, secret]) {
-        assert.ok(!r.stdout.includes(v) && !r.stderr.includes(v), 'a secret was printed');
-      }
-      assert.match(r.stdout, /Clipboard cleared/);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    const dir = realpathSync(mkdtempSync(path.join(tmpdir(), 'hashpw-')));
+    temps.push(dir);
+    const dash = path.join(dir, 'dashboard');
+    for (const d of ['scripts', 'lib', 'bin']) mkdirSync(path.join(dash, d), { recursive: true });
+    copyFileSync(path.join(DASH, 'scripts/hash-password.ts'), path.join(dash, 'scripts/hash-password.ts'));
+    copyFileSync(path.join(DASH, 'lib/password.ts'), path.join(dash, 'lib/password.ts'));
+    writeFileSync(path.join(dash, 'package.json'), '{"type":"module"}');
+    if (opts.linked !== false) {
+      mkdirSync(path.join(dash, '.vercel'));
+      writeFileSync(path.join(dash, '.vercel/project.json'), '{"projectId":"prj_test","orgId":"team_test"}');
     }
+    const bin = path.join(dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(path.join(bin, 'npx'), FAKE_NPX);
+    writeFileSync(path.join(bin, 'pbcopy'), FAKE_PBCOPY);
+    chmodSync(path.join(bin, 'npx'), 0o755);
+    chmodSync(path.join(bin, 'pbcopy'), 0o755);
+    const cap = path.join(dir, 'npx.log');
+    const clip = path.join(dir, 'clipboard.log');
+    const r = spawnSync(process.execPath, [path.join(dash, 'scripts/hash-password.ts'), ...args], {
+      encoding: 'utf8', input: opts.input ?? '\n',
+      env: { PATH: `${bin}:${process.env['PATH'] ?? ''}`, HOME: dir, CAP: cap, CLIP: clip, FAKE_LOGGED_IN: opts.loggedIn === false ? '0' : '1', FAKE_ADD_FAILS: opts.addFails === true ? '1' : '0' },
+    });
+    const read = (f: string) => (existsSync(f) ? readFileSync(f, 'utf8') : '');
+    return { status: r.status, stdout: r.stdout, stderr: r.stderr, npx: read(cap), clipboard: read(clip).split('\n--END--\n').slice(0, -1), dash };
+  }
+  const added = (npx: string) => [...npx.matchAll(/ARGS:--yes (vercel@\S+) env add (\S+) production --sensitive --force\nCWD:(.*)\nIGNORE_SCRIPTS:(.*)\nSTDIN:([\s\S]*?)\n--END--/g)]
+    .map((m) => ({ cli: m[1]!, name: m[2]!, cwd: m[3]!, ignoreScripts: m[4]!, value: m[5]! }));
+  const temps: string[] = [];
+  after(async () => { const { rmSync } = await import('node:fs'); for (const d of temps) rmSync(d, { recursive: true, force: true }); });
+
+  it('puts ONLY the password on the clipboard, then clears it; pipes the hash and secret into vercel env add on stdin', async () => {
+    const r = await run(['--vercel']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.clipboard.length, 2, 'the password, then a cleared clipboard: nothing else');
+    const [password, cleared] = r.clipboard as [string, string];
+    assert.equal(cleared, '');
+    const adds = added(r.npx);
+    assert.deepEqual(adds.map((a) => a.name), ['DASHBOARD_PASSWORD_HASH', 'DASHBOARD_SESSION_SECRET']);
+    const hash = adds[0]!.value;
+    const secret = adds[1]!.value;
+    assert.ok(await verifyPassword(password, hash), 'the hash sent to Vercel is of the password given to you');
+    assert.equal(secret.length, 64);
+    for (const a of adds) {
+      assert.equal(a.cli, VERCEL_CLI_PIN);
+      assert.equal(a.cwd, r.dash, 'run in dashboard/, the linked project');
+      assert.equal(a.ignoreScripts, 'true');
+    }
+    const argvLines = r.npx.split('\n').filter((l) => l.startsWith('ARGS:')).join('\n');
+    for (const v of [password, hash, secret]) {
+      assert.ok(!r.stdout.includes(v) && !r.stderr.includes(v), 'a secret was printed');
+      assert.ok(!argvLines.includes(v), 'a secret was passed in argv');
+    }
+    assert.ok(!r.clipboard.includes(hash) && !r.clipboard.includes(secret), 'the hash or secret touched the clipboard');
+  });
+
+  it('--session-only: a new session secret only; no password, no clipboard', async () => {
+    const r = await run(['--vercel', '--session-only']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(r.clipboard, []);
+    const adds = added(r.npx);
+    assert.deepEqual(adds.map((a) => a.name), ['DASHBOARD_SESSION_SECRET']);
+    assert.ok(!r.stdout.includes(adds[0]!.value));
+  });
+
+  it('refuses before making a password when not linked, or not logged in', async () => {
+    for (const opts of [{ linked: false }, { loggedIn: false }]) {
+      const r = await run(['--vercel'], opts);
+      assert.equal(r.status, 1, JSON.stringify(opts));
+      assert.deepEqual(r.clipboard, [], 'no password was made');
+      assert.deepEqual(added(r.npx), []);
+    }
+  });
+
+  it('sends nothing to Vercel if input ends before the password is saved', async () => {
+    const r = await run(['--vercel'], { input: '' });
+    assert.equal(r.status, 1);
+    assert.equal(r.clipboard.at(-1), '', 'the clipboard is cleared');
+    assert.deepEqual(added(r.npx), []);
+  });
+
+  it('stops, and says so, when Vercel refuses a value; the value never appears', async () => {
+    const r = await run(['--vercel'], { addFails: true });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /Vercel did not accept DASHBOARD_PASSWORD_HASH/);
+    assert.equal(added(r.npx).length, 1, 'stopped at the first refusal');
+    assert.ok(!r.stderr.includes(added(r.npx)[0]!.value));
+  });
+
+  it('pins the same Vercel CLI as the README', () => {
+    const readme = readFileSync(path.join(DASH, '..', 'README.md'), 'utf8');
+    const pins = new Set([...readme.matchAll(/vercel@(\d+\.\d+\.\d+)/g)].map((m) => `vercel@${m[1]}`));
+    assert.deepEqual([...pins], [VERCEL_CLI_PIN]);
   });
 });

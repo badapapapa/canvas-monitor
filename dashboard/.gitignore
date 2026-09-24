@@ -1,0 +1,4 @@
+# Already here so the Vercel CLI finds them ignored and never writes its own
+# .gitignore in this folder (DECISIONS.md D-71). The root .gitignore covers them too.
+.vercel
+.env*

@@ -1,24 +1,34 @@
 /**
- * Choose the dashboard password (DECISIONS.md D-65). Run it yourself, locally:
+ * Choose the dashboard password (DECISIONS.md D-65, D-71). Run it yourself, locally:
  *
- *   node scripts/hash-password.ts              # generate a strong password (recommended)
- *   node scripts/hash-password.ts --own        # type your own (no echo; 20+ characters)
- *   node scripts/hash-password.ts --clipboard  # macOS: print NOTHING secret (D-69)
+ *   node dashboard/scripts/hash-password.ts --vercel                  # recommended
+ *   node dashboard/scripts/hash-password.ts --vercel --own            # type your own (no echo; 20+)
+ *   node dashboard/scripts/hash-password.ts --vercel --session-only   # new session secret: signs everyone out
+ *   node dashboard/scripts/hash-password.ts                           # prints all three instead
  *
- * Gives you, alone: the password (generated mode only -- put it in your
- * password manager; it is not stored anywhere), its scrypt HASH for Vercel's
- * DASHBOARD_PASSWORD_HASH, and a fresh DASHBOARD_SESSION_SECRET. Nothing is
- * written to disk, sent anywhere, or kept in shell history (no arguments).
+ * --vercel (macOS, with the Vercel CLI logged in and dashboard/ linked):
+ *   - the new PASSWORD goes on the clipboard, for your password manager, and
+ *     nothing else ever does; the clipboard is cleared after you press Enter;
+ *   - the HASH and a fresh SESSION SECRET go straight into
+ *     `vercel env add NAME production --sensitive --force` on its stdin: never on
+ *     the clipboard, never on screen, never in argv (which `ps` shows);
+ *   - nothing secret is printed. Redeploy afterwards for them to take effect.
  *
- * By default they are printed. With --clipboard each is put on the clipboard in
- * turn (pbcopy): paste it where it goes, press Enter for the next. None is
- * printed, and the clipboard is cleared at the end, even on Ctrl-C.
+ * Without --vercel the three are printed, for you alone. Nothing is written to
+ * disk, sent anywhere else, or kept in shell history (no arguments carry values).
  */
 
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
 import { randomBytes, randomInt } from 'node:crypto';
 import { hashPassword } from '../lib/password.ts';
+
+/** The pinned Vercel CLI (README, "Redeploying the dashboard"; a test keeps the two equal). */
+export const VERCEL_CLI = 'vercel@59.19.1';
+const DASH = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 // 31 symbols, no look-alikes (0/O, 1/l/I): 24 of them is about 119 random bits.
 const ALPHABET = 'abcdefghjkmnpqrstuvwxyz23456789';
@@ -65,41 +75,73 @@ if (process.env['CI'] !== undefined || process.env['GITHUB_ACTIONS'] !== undefin
 }
 
 const own = process.argv.includes('--own');
-let password: string;
-if (own) {
-  password = await readHidden('Password (hidden, 20+ characters): ');
-  const again = await readHidden('Again: ');
-  if (password !== again) throw new Error('The two entries differ.');
-  if (password.length < 20) throw new Error('Use 20 or more characters (or run without --own to generate one).');
-} else {
-  password = generate();
+const toVercel = process.argv.includes('--vercel');
+const sessionOnly = process.argv.includes('--session-only');
+const fail = (message: string): never => {
+  process.stderr.write(`hash-password: ${message}\n`);
+  process.exit(1);
+};
+if (sessionOnly && (!toVercel || own)) fail('--session-only goes with --vercel, and makes no password.');
+
+/** The Vercel CLI, pinned, run in dashboard/, never running npm install scripts. */
+const vercel = (args: string[], input?: string) => spawnSync('npx', ['--yes', VERCEL_CLI, ...args], {
+  cwd: DASH,
+  input,
+  stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+  env: { ...process.env, npm_config_ignore_scripts: 'true', VERCEL_TELEMETRY_DISABLED: '1' },
+});
+
+if (toVercel) {
+  // Everything checked BEFORE a password exists, so a failure never strands a saved password.
+  if (!existsSync(path.join(DASH, '.vercel', 'project.json'))) fail('dashboard/ is not linked to the Vercel project (README, "Redeploying the dashboard").');
+  if (vercel(['whoami']).status !== 0) fail('the Vercel CLI is not logged in: npx --yes ' + VERCEL_CLI + ' login');
 }
 
-const hash = await hashPassword(password);
+let password = '';
+if (!sessionOnly) {
+  if (own) {
+    password = await readHidden('Password (hidden, 20+ characters): ');
+    const again = await readHidden('Again: ');
+    if (password !== again) throw new Error('The two entries differ.');
+    if (password.length < 20) throw new Error('Use 20 or more characters (or run without --own to generate one).');
+  } else {
+    password = generate();
+  }
+}
+
+const hash = sessionOnly ? '' : await hashPassword(password);
 const sessionSecret = randomBytes(48).toString('base64url');
 
-if (process.argv.includes('--clipboard')) {
+if (toVercel) {
   const copy = (value: string) => {
-    if (spawnSync('pbcopy', { input: value }).status !== 0) throw new Error('--clipboard needs pbcopy (macOS).');
+    if (spawnSync('pbcopy', { input: value }).status !== 0) throw new Error('--vercel needs pbcopy (macOS).');
   };
-  const items: Array<[string, string]> = [
-    ...(own ? [] : [['your new dashboard password: paste it into your password manager', password] as [string, string]]),
-    ['DASHBOARD_PASSWORD_HASH: paste it as its value in Vercel (Production only, Sensitive)', hash],
-    ['DASHBOARD_SESSION_SECRET: paste it as its value in Vercel (Production only, Sensitive)', sessionSecret],
-  ];
   const clear = () => { try { copy(''); } catch { /* nothing to clear */ } };
   process.on('SIGINT', () => { clear(); process.stdout.write('\nClipboard cleared.\n'); process.exit(130); });
-  const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
-  try {
-    for (const [what, value] of items) {
-      copy(value);
-      process.stdout.write(`\nCopied ${what}.\nPress Enter when done.\n`);
-      if ((await lines.next()).done === true) throw new Error('Input ended early; stopping.');
-    }
-  } finally {
+
+  if (!sessionOnly && !own) {
+    const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+    copy(password);
+    process.stdout.write('\nYour new dashboard password is on the clipboard. Save it in your password manager,\nthen press Enter here. Nothing goes to Vercel until you do.\n');
+    const done = (await lines.next()).done === true;
     clear();
-    process.stdout.write('\nClipboard cleared. Nothing secret was printed. Changing either Vercel value later logs every session out.\n');
+    if (done) fail('input ended before Enter; nothing was sent to Vercel. Clipboard cleared.');
+    process.stdout.write('Clipboard cleared.\n');
   }
+
+  const values: Array<[string, string]> = [
+    ...(sessionOnly ? [] : [['DASHBOARD_PASSWORD_HASH', hash] as [string, string]]),
+    ['DASHBOARD_SESSION_SECRET', sessionSecret],
+  ];
+  for (const [name, value] of values) {
+    const r = vercel(['env', 'add', name, 'production', '--sensitive', '--force'], value);
+    if (r.status !== 0) {
+      const why = (r.stderr?.toString() ?? '').split('\n').map((l) => l.trim()).filter(Boolean).at(-1)?.replaceAll(value, '[value]') ?? '';
+      fail(`Vercel did not accept ${name} (exit ${String(r.status)}${why === '' ? '' : `: ${why}`}). The live site is unchanged until you redeploy; run this again.`);
+    }
+    process.stdout.write(`Set ${name} in Vercel (Production, Sensitive).\n`);
+  }
+  process.stdout.write('\nNothing secret was printed. Redeploy for this to take effect; every session is then signed out:\n  cd dashboard && npx --yes ' + VERCEL_CLI + ' deploy --prod\n');
   process.exit(0);
 }
 

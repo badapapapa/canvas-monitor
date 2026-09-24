@@ -497,7 +497,7 @@ const MUTATIONS: Mutation[] = [
   {
     name: 'a cacheable authenticated response',
     file: 'dashboard/lib/headers.ts',
-    from: "'Cache-Control': 'no-store, max-age=0',",
+    from: "'Cache-Control': CACHE_CONTROL,",
     to: "'Cache-Control': 'public, max-age=3600',",
     tests: [DASHBOARD],
   },
@@ -628,17 +628,45 @@ const MUTATIONS: Mutation[] = [
     tests: [DASHBOARD],
   },
   {
-    name: 'the password script printing a secret in --clipboard mode',
+    name: 'the password script putting the HASH on the clipboard instead of the password',
     file: 'dashboard/scripts/hash-password.ts',
-    from: 'process.stdout.write(`\\nCopied ${what}.\\nPress Enter when done.\\n`);',
-    to: 'process.stdout.write(`\\nCopied ${what}: ${value}.\\nPress Enter when done.\\n`);',
+    from: '    copy(password);',
+    to: '    copy(hash);',
     tests: [DASHBOARD],
   },
   {
-    name: 'the password script leaving the last secret on the clipboard',
+    name: 'the password script passing a secret to vercel in argv (visible to ps)',
     file: 'dashboard/scripts/hash-password.ts',
-    from: "  const clear = () => { try { copy(''); } catch { /* nothing to clear */ } };",
-    to: '  const clear = () => {};',
+    from: "const r = vercel(['env', 'add', name, 'production', '--sensitive', '--force'], value);",
+    to: "const r = vercel(['env', 'add', name, 'production', '--sensitive', '--force', '--value', value], value);",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script adding a variable that is not Sensitive',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: "const r = vercel(['env', 'add', name, 'production', '--sensitive', '--force'], value);",
+    to: "const r = vercel(['env', 'add', name, 'production', '--force'], value);",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script letting npx run install scripts',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: "npm_config_ignore_scripts: 'true'",
+    to: "npm_config_ignore_scripts: 'false'",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script making a password before checking the CLI is logged in',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: "  if (vercel(['whoami']).status !== 0) fail(",
+    to: "  if (false) fail(",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script leaving the password on the clipboard',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: '    clear();\n    if (done) fail(',
+    to: '    if (done) fail(',
     tests: [DASHBOARD],
   },
   {
@@ -672,7 +700,7 @@ const MUTATIONS: Mutation[] = [
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const COPY = ['src', 'test', 'migrations', '.github', 'package.json', 'tsconfig.json'];
+const COPY = ['src', 'test', 'migrations', '.github', 'package.json', 'tsconfig.json', 'README.md'];
 
 function failures(dir: string, tests: string[]): { failed: number; output: string } {
   const run = spawnSync(process.execPath, ['--test', ...tests], { cwd: dir, encoding: 'utf8', timeout: 180_000 });

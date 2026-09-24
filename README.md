@@ -262,21 +262,57 @@ model. The dashboard holds a read-only token for that database alone.
 | `npm run readmodel -- migrate` | Create the read model's tables (write token). |
 | `npm run readmodel -- verify` | Prove the token separation against Turso, and the recorded expiry. All six checks must pass before deploying. |
 | `npm run readmodel -- publish` | Publish once now (the sync does it every run). |
-| `node dashboard/scripts/hash-password.ts --clipboard` | Generate the dashboard password, its hash and the session secret, one at a time on the clipboard, printing none of them. Without `--clipboard` they are printed. |
+| `node dashboard/scripts/hash-password.ts --vercel` | A new dashboard password on the clipboard (for your password manager), and its hash and a new session secret piped straight into Vercel. Nothing secret is printed. `--session-only`: a new session secret alone. |
 | `npm run dashboard:smoke` | Build a copy of the dashboard and check it on invented data: over HTTP, and the whole login flow in WebKit (Safari) and Chromium. Needs `npx playwright install webkit chromium` once. |
 | `npm run dashboard:preview` | The dashboard locally on the real read model (read-only token, throwaway password), self-checked. Serve it with `npm --prefix dashboard run start -- -p 3100 -H localhost`, open http://localhost:3100, and paste `pbcopy < var/dashboard-preview/password`. `-- --clean` removes its secrets. |
 
-Secrets live only in `.env` (gitignored, for local runs), GitHub Actions
-secrets (the sync's write token) and Vercel's Production environment (the
-dashboard's read token, password hash and session secret). A preview
-deployment is never built, is given no secrets, and would serve nothing if it
-were.
+A preview deployment is never built automatically, is given no secrets, and
+serves nothing (DECISIONS.md D-65, D-70).
+
+### Where every secret lives
+
+| Secret | Where | What can read it | What it reaches |
+|---|---|---|---|
+| Canvas token, OneDrive refresh token, Telegram bot token, health-check URL | Main database, `config` table | Anything holding the main database token | Canvas; the OneDrive app folder; the bot |
+| Main database URL and token | `.env` on this Mac; GitHub Actions secrets | This Mac's CLI and mirror; the sync workflow | The main database, so everything above |
+| Read-model URL and write token | `.env`; GitHub Actions secrets | This Mac; the sync workflow | The read model only, read and write |
+| Read-model read-only token (expires; its date is in `dashboard_read_token_expires_at`) | `.env`, for `verify`; Vercel Production, Sensitive | This Mac; the production deployment's server code | The read model only, read-only |
+| Dashboard password | Your password manager only | You | The dashboard, behind Vercel's login |
+| Password hash and session secret | Vercel Production, Sensitive | The production deployment's server code | Signing in; signing sessions |
+| Session cookie `__Host-cm_session` | Your browsers; HttpOnly; 30 days | Not the page's scripts | The dashboard, still behind Vercel's login |
+| Vercel account | Email, plus Vercel's two-factor | You | The Vercel project: deploys and env vars (Sensitive values cannot be read back) |
+| Vercel CLI token | `~/Library/Application Support/com.vercel.cli/auth.json`, only between `login` and `logout` | Anything running as you on this Mac | The Vercel account |
+| Vercel Authentication cookie | Your browsers, one per address | Not the page's scripts | Past Vercel's login to the dashboard |
+| GitHub account | Password, plus GitHub's two-factor | You | The repository and its Actions secrets |
+| Turso CLI login | This Mac | Anything running as you on this Mac | Both databases; creating tokens |
+| Canvas calendar feed URL (outside this system) | Google Calendar, as a subscription | Google; you | Your Canvas calendar, read-only |
+
+**Temporary copies:**
+- `npm run dashboard:preview` puts the read-only token and a throwaway password
+  in `dashboard/.env.local` and `var/dashboard-preview/` while you preview.
+  `--clean` removes them.
+- A `vercel link` that pulls "development environment variables" writes a
+  12-hour Vercel OIDC token to `dashboard/.env.local`. Nothing in this system
+  trusts it, but delete it (D-71).
 
 ### Redeploying the dashboard
 
 The dashboard is deployed from this Mac with the Vercel CLI. Vercel has no
-access to GitHub (DECISIONS.md D-70). Commit first (`git status` clean), then,
-in one Terminal window:
+access to GitHub (DECISIONS.md D-70).
+
+**Once per Mac: stop the CLI installing a Claude Code plugin** (D-71). This
+records "declined" in the CLI's own preferences, which is the only switch it
+honours:
+
+```
+node -e 'const f=require("os").homedir()+"/Library/Application Support/com.vercel.cli/agent-preferences.json",fs=require("fs");let p={};try{p=JSON.parse(fs.readFileSync(f,"utf8"))}catch{}p.pluginDeclined=true;p.pluginAutoUpdate=false;fs.mkdirSync(require("path").dirname(f),{recursive:true});fs.writeFileSync(f,JSON.stringify(p,null,2)+"\n")'
+```
+
+Check: `grep plugin ~/Library/Application\ Support/com.vercel.cli/agent-preferences.json`
+shows `"pluginDeclined": true` and `"pluginAutoUpdate": false`.
+
+**Each redeploy.** Commit first (`git status` clean), then, in one Terminal
+window, from the repository root:
 
 ```
 export npm_config_ignore_scripts=true VERCEL_TELEMETRY_DISABLED=1
@@ -284,18 +320,88 @@ npx --yes vercel@59.19.1 login
 cd dashboard
 npx --yes vercel@59.19.1 deploy --prod
 npx --yes vercel@59.19.1 logout
+cd ..
+ls -a dashboard | grep -E '^\.env'
+git status --short
 ```
 
-Always `--prod`: a plain `deploy` makes a preview, which has no secrets and
-serves nothing. Logging out revokes the CLI's token. If `link` or `deploy` ever
-offers to connect a Git repository, answer No.
+The last two print nothing. If `ls` shows a `.env` file, delete it: it is a
+Vercel token the CLI downloaded.
+- **Always `--prod`.** A plain `deploy` makes a preview, which has no secrets
+  and serves nothing.
+- **Logging out revokes the CLI's token.**
+- **Do not run `vercel link` again.** `dashboard/.vercel/` already holds the
+  link (project and team IDs only, no secrets). If you ever must re-link:
+  - answer **No** to "Pull development environment variables into
+    .env.local?";
+  - answer **No** to connecting a Git repository.
 
 ### Revoking access
 
-Change `DASHBOARD_SESSION_SECRET` in Vercel (Production), then **redeploy**:
-Vercel applies env changes to new deployments only. Every session on every
-device ends at once. Sessions otherwise last 30 days. Changing the password
-hash does the same.
+A new session secret signs every device out at once. Sessions otherwise last
+30 days. With the CLI logged in, from the repository root:
+
+```
+node dashboard/scripts/hash-password.ts --vercel --session-only
+```
+
+Then **redeploy** (above): Vercel applies env changes to new deployments only.
+
+A new password does the same, and replaces the password too:
+`node dashboard/scripts/hash-password.ts --vercel`. The new password goes on
+the clipboard for your password manager, and nothing else ever does. The
+hash and session secret go straight into Vercel. Nothing secret is printed.
+
+### Checking the live site
+
+Sign in, open the browser's JavaScript console:
+- **Chrome:** View → Developer → JavaScript Console.
+- **Safari:** Develop → Show JavaScript Console, after turning on "Show
+  features for web developers".
+
+Paste this. It should print `ALL PASS`:
+
+```js
+(async () => {
+  const r = await fetch(location.pathname, { cache: 'no-store' });
+  const h = (k) => r.headers.get(k) ?? '';
+  const csp = h('content-security-policy');
+  const cc = h('cache-control');
+  const age = Number(/max-age=(\d+)/.exec(h('strict-transport-security'))?.[1] ?? 0);
+  const checks = {
+    'HSTS, a year or more': age >= 31536000,
+    "CSP nonce + 'strict-dynamic'": /'nonce-[^']+' 'strict-dynamic'/.test(csp),
+    "CSP frame-ancestors 'none'": csp.includes("frame-ancestors 'none'"),
+    'CSP upgrade-insecure-requests': csp.includes('upgrade-insecure-requests'),
+    'CSP no unsafe-inline/eval': !/unsafe-(inline|eval)/.test(csp),
+    'Cache-Control no-store, not public': /(^|[\s,])no-store([\s,]|$)/.test(cc) && !/public/.test(cc),
+    'X-Robots-Tag noindex, nofollow': /noindex/.test(h('x-robots-tag')) && /nofollow/.test(h('x-robots-tag')),
+    'Referrer-Policy same-origin': h('referrer-policy') === 'same-origin',
+    'X-Frame-Options DENY': /DENY/.test(h('x-frame-options')),
+    'nosniff': /nosniff/.test(h('x-content-type-options')),
+    'COOP same-origin': h('cross-origin-opener-policy') === 'same-origin',
+    'CORP same-origin': h('cross-origin-resource-policy') === 'same-origin',
+    'Permissions-Policy': h('permissions-policy').includes('camera=()'),
+    'no X-Powered-By': r.headers.get('x-powered-by') === null,
+    'session cookie invisible to scripts': !document.cookie.includes('cm_session'),
+  };
+  console.table(checks);
+  return Object.values(checks).every(Boolean) ? 'ALL PASS' : 'SOMETHING FAILED: see the table';
+})()
+```
+
+Production sends `Cache-Control: private, no-cache, no-store, max-age=0,
+must-revalidate` (the tests assert exactly that).
+
+**The cookie:** it is `__Host-cm_session`, with:
+- HttpOnly ✓ and Secure ✓;
+- SameSite Strict;
+- path `/`;
+- no Domain;
+- about 30 days to expiry.
+
+Chrome shows it in DevTools → Application → Cookies; Safari in Web Inspector →
+Storage → Cookies.
 
 ### Rotating the dashboard's read-only token
 
@@ -313,8 +419,13 @@ simply expires. From the repo root:
 2. `npm run readmodel -- verify`. Check 6 fails and prints the new token's
    expiry. Record it: `npm run set-config dashboard_read_token_expires_at`
    (paste the date, then Ctrl-D). Run verify again: six PASS.
-3. Vercel → Settings → Environment Variables: replace `READMODEL_READ_TOKEN`
-   (Production only, Sensitive), then redeploy.
+3. Give Vercel the new token without printing it. With the CLI logged in, from
+   `dashboard/`:
+   ```
+   grep '^READMODEL_READ_TOKEN=' ../.env | cut -d= -f2- | tr -d '\n' | npx --yes vercel@59.19.1 env add READMODEL_READ_TOKEN production --sensitive --force
+   ```
+   Then redeploy (see "Redeploying the dashboard", including its checks), and
+   log out.
 
 **If a token has leaked.** `turso db tokens invalidate canvas-readmodel`
 revokes it. But on the free plan both databases share one group, and
@@ -324,8 +435,8 @@ the read model's write token. Sync runs fail until all three are replaced:
    `.env` and in the GitHub secret;
 2. write: `turso db tokens create canvas-readmodel` → `READMODEL_WRITE_TOKEN`
    in `.env` and in the GitHub secret;
-3. read: as in routine rotation above, including Vercel and the recorded
-   expiry;
+3. read: as in routine rotation above, including Vercel, the redeploy and
+   the recorded expiry;
 4. `npm run readmodel -- verify`: six PASS.
 
 ## Privacy posture
