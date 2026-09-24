@@ -808,6 +808,10 @@ Until the Phase 8 dashboard exists there is no form to paste into, so rotation
 is `npm run set-config canvas_token`, which reads the value from **stdin, never
 argv** (an argument lands in shell history and in `ps` output).
 
+> **As built (DECISIONS.md D-65):** the Phase 8 dashboard is strictly read-only
+> and never reaches the main database, so there is no paste form. Rotation
+> stays `npm run set-config`, permanently.
+
 Alert at T−14, T−7, T−3, T−1.
 
 ---
@@ -849,7 +853,7 @@ Ship and use each phase before starting the next. **Do not build ahead.**
 | 5 | Routing rules, `_unsorted` flow, `--replay` | Most files route correctly; misroutes are visible |
 | 6 | `npm run tune-patterns`, then answer follow-ups | Patterns confirmed against real history; tracking works end to end |
 | 7 | Versioning Tiers 1–3, reconciliation command, FTS5 search | No duplicate confusion |
-| 8 | Optional read-only dashboard (separate Next.js app) | — |
+| 8 | Optional read-only dashboard (separate Next.js app). As built: a separate read-model database, D-65 | — |
 
 Phase 2 is the real milestone for **notification**: if the alerts are timely
 and trustworthy, my original problem is solved.

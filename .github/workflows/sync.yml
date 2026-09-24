@@ -61,6 +61,11 @@ jobs:
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          # The dashboard's read model (D-65): a SEPARATE database. This token
+          # can write the read model only; it cannot reach the main database.
+          # Absent: the sync simply does not publish.
+          READMODEL_DATABASE_URL: ${{ secrets.READMODEL_DATABASE_URL }}
+          READMODEL_WRITE_TOKEN: ${{ secrets.READMODEL_WRITE_TOKEN }}
           # GitHub exposes which cron fired, not when it was meant to. The run
           # reconstructs its slot from this to measure drift (D-43).
           CRON_SCHEDULE: ${{ github.event.schedule }}

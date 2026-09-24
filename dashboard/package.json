@@ -1,0 +1,28 @@
+{
+  "name": "canvas-monitor-dashboard",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Read-only, password-protected dashboard over the separate read-model database (DECISIONS.md D-65).",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@libsql/client": "0.15.15",
+    "next": "16.3.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.18"
+  }
+}

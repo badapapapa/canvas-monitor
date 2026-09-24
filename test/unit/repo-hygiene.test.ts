@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 const REPO = path.resolve(fileURLToPath(new URL('../..', import.meta.url)));
 const FIXTURES = path.join(REPO, 'test', 'fixtures');
 
-const SKIP_DIRS = new Set(['node_modules', '.git', 'var', 'data', 'dist']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'var', 'data', 'dist', '.next']);
 const SKIP_FILES = new Set(['package-lock.json']);
 
 /**

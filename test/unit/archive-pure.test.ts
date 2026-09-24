@@ -290,7 +290,10 @@ describe('structure: only src/graph talks to Microsoft, and only through the gua
 
   it('names the Microsoft hosts in exactly one place', () => {
     const hits = sources(SRC).filter((f) => /graph\.microsoft\.com|login\.microsoftonline\.com|onedrive\.live\.com|1drv\.ms/.test(readFileSync(f, 'utf8')));
-    assert.deepEqual(hits.map((f) => path.relative(SRC, f)), [path.join('graph', 'guard.ts')]);
+    // guard.ts is where requests go; readmodel/schema.ts only VALIDATES stored
+    // OneDrive links (a CHECK constraint) and must never make a request itself.
+    assert.deepEqual(hits.map((f) => path.relative(SRC, f)).sort(), [path.join('graph', 'guard.ts'), path.join('readmodel', 'schema.ts')]);
+    assert.doesNotMatch(readFileSync(path.join(SRC, 'readmodel', 'schema.ts'), 'utf8'), /\bfetch\(|https?\.request|createClient/);
   });
 
   it('checks every Graph request against the guard immediately before sending it', () => {

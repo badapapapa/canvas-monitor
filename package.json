@@ -30,7 +30,9 @@
     "mirror": "node src/cli/index.ts mirror",
     "tune-patterns": "node src/cli/index.ts tune-patterns",
     "followups": "node src/cli/index.ts followups",
-    "timetable": "node src/cli/index.ts timetable"
+    "timetable": "node src/cli/index.ts timetable",
+    "readmodel": "node src/cli/index.ts readmodel",
+    "dashboard:smoke": "node scripts/dashboard-smoke.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"

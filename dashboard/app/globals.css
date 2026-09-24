@@ -1,0 +1,91 @@
+/*
+ * Based on the Canvas Monitor dashboard mockup, simplified. System fonts only:
+ * no web fonts, so the dashboard makes no request to any third party (and the
+ * CSP forbids one). No inline styles anywhere: everything is a class, which the
+ * strict CSP requires.
+ */
+
+:root {
+  --bg: #f5f3ee;
+  --card: #ffffff;
+  --ink: #1a1916;
+  --muted: #55514a;
+  --line: #e3dfd5;
+  --line-soft: #efebe2;
+  --accent: #a5451f;
+  --accent-ink: #ffffff;
+  --ok: #14603c;
+  --ok-bg: #e6f0e9;
+  --warn: #7a4a08;
+  --warn-bg: #f6eddd;
+  --bad: #8f1d1d;
+  --bad-bg: #f8e3e1;
+  --new: #fff6e8;
+  --serif: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --sans: system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.45; }
+a { color: var(--accent); }
+a:hover { color: #7e3213; }
+
+.page { max-width: 1240px; margin: 0 auto; padding: 32px 20px 48px; display: flex; flex-direction: column; gap: 20px; }
+.title { margin: 0; font-family: var(--serif); font-size: 32px; font-weight: 600; letter-spacing: -0.3px; }
+.h2 { margin: 0 0 12px; font-size: 16px; font-weight: 600; }
+.muted { color: var(--muted); margin: 0; }
+.small { font-size: 13px; }
+.ok { color: var(--ok); }
+.warn { color: var(--warn); }
+.note { margin-top: 12px; }
+.footnote { text-align: left; }
+
+.header { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; flex-wrap: wrap; }
+.header-side { display: flex; align-items: center; gap: 12px; }
+.pill { font-size: 13px; border-radius: 999px; padding: 6px 12px; border: 1px solid transparent; }
+.pill-ok { color: var(--ok); background: var(--ok-bg); border-color: #c7dcce; }
+.pill-warn { color: var(--warn); background: var(--warn-bg); border-color: #e4d3b4; }
+.pill-bad { color: var(--bad); background: var(--bad-bg); border-color: #e9c3bf; }
+.link-button { background: none; border: none; color: var(--muted); font: inherit; font-size: 13px; text-decoration: underline; cursor: pointer; min-height: 44px; padding: 0 4px; }
+
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.tile-value { margin: 6px 0 0; font-family: var(--serif); font-size: 28px; font-weight: 600; }
+
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px 22px; }
+.columns { display: grid; grid-template-columns: minmax(0, 1fr) 360px; gap: 20px; align-items: start; }
+.col-main, .col-side { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+
+.row { display: flex; align-items: center; gap: 16px; padding: 14px 0; border-bottom: 1px solid var(--line-soft); }
+.row:last-child { border-bottom: none; padding-bottom: 0; }
+.grow { flex: 1 1 auto; min-width: 0; }
+.meta { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; flex-wrap: wrap; }
+.item-title { font-weight: 500; overflow-wrap: anywhere; }
+.item-title a { color: var(--ink); text-decoration: none; }
+.item-title a:hover { text-decoration: underline; }
+.line { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line-soft); }
+.line:last-of-type { border-bottom: none; }
+
+.chip { font-size: 11px; font-weight: 600; letter-spacing: 0.3px; border-radius: 5px; padding: 3px 8px; text-decoration: none; white-space: nowrap; }
+.chip-0 { color: #1f4e79; background: #e7eff7; }
+.chip-1 { color: #1f5b4e; background: #e4f0ec; }
+.chip-2 { color: #5a3670; background: #eee8f3; }
+.chip-3 { color: #6b4a0e; background: #f5ecdc; }
+
+.button { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 0 16px; border-radius: 10px; border: none; background: var(--accent); color: var(--accent-ink); font: inherit; font-size: 14px; font-weight: 500; text-decoration: none; cursor: pointer; white-space: nowrap; }
+.button:hover { background: #7e3213; color: var(--accent-ink); }
+
+.activity.is-new { background: var(--new); margin: 0 -22px; padding-left: 22px; padding-right: 22px; }
+.badge-new { font-size: 11px; font-weight: 600; color: var(--warn); background: var(--warn-bg); border-radius: 5px; padding: 2px 7px; }
+
+.login { max-width: 380px; margin: 12vh auto 0; padding: 0 20px; display: flex; flex-direction: column; gap: 20px; }
+.login-card { display: flex; flex-direction: column; gap: 12px; }
+.label { font-size: 14px; font-weight: 500; }
+.input { font: inherit; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; min-height: 44px; }
+.input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.error { margin: 0; color: var(--bad); font-size: 14px; }
+
+@media (max-width: 900px) {
+  .columns { grid-template-columns: minmax(0, 1fr); }
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .deadline { flex-wrap: wrap; }
+}

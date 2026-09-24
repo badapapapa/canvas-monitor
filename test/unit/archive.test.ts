@@ -23,6 +23,7 @@ import { applyReroutes, planReroutes } from '../../src/archive/reroute.ts';
 import { TokenProvider } from '../../src/graph/auth.ts';
 import { GraphDrive } from '../../src/graph/drive.ts';
 import { RequestGuard, SCOPES, type RootSpec } from '../../src/graph/guard.ts';
+import { READMODEL_DDL, READMODEL_SCHEMA_VERSION } from '../../src/readmodel/schema.ts';
 
 interface FakeFile {
   id: number;
@@ -155,7 +156,7 @@ async function harness(graphState: ConstructorParameters<typeof FakeGraph>[0] = 
     runSync(ctx(dryRun), { telegramApiBase: telegram.url, graphBase: graph.graphBase, loginBase: graph.loginBase });
   const ROOT = `/Apps/${graph.state.appName}`;
   const personalBefore = graph.snapshotOutsideRoot(ROOT);
-  return { ctx, logLines, files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
+  return { telegramUrl: telegram.url, ctx, logLines, files, brokenStorage, storageAuth, canvasAuth, graph, sent, client, clock, sync, ROOT, personalBefore, db };
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
@@ -730,5 +731,39 @@ describe('Phase 6: follow-ups through a whole sync (D-61)', () => {
     assert.equal(outcome.followups?.status, 'awaiting_ruling');
     assert.equal(followupMessages(h).length, 0);
     assert.deepEqual(await rows(h), []);
+  });
+});
+
+describe('Phase 8: the sync publishes the dashboard read model (D-65)', () => {
+  async function readModel() {
+    const dir = await mkdtemp(path.join(tmpdir(), 'rm-sync-'));
+    temps.push(dir);
+    const rm = createClient({ url: `file:${path.join(dir, 'rm.sqlite')}` });
+    await rm.batch([...READMODEL_DDL, { sql: "INSERT INTO rm_meta (name, value) VALUES ('schema_version', ?)", args: [READMODEL_SCHEMA_VERSION] }], 'write');
+    return rm;
+  }
+
+  it('publishes on a real run, and never on --dry-run', async () => {
+    const h = await harness();
+    h.files.push({ id: 1, name: 'Lecture 06.pdf', size: 1000, folder: 7 });
+    const rm = await readModel();
+    const dry = await runSync(h.ctx(true), { telegramApiBase: 'http://127.0.0.1:9', graphBase: h.graph.graphBase, loginBase: h.graph.loginBase, readModel: rm });
+    assert.equal(dry.readModel, null);
+    assert.equal((await rm.execute('SELECT count(*) AS n FROM rm_modules')).rows[0]?.['n'], 0);
+    const real = await runSync(h.ctx(), { telegramApiBase: h.telegramUrl, graphBase: h.graph.graphBase, loginBase: h.graph.loginBase, readModel: rm });
+    assert.equal(real.readModel, 'published');
+    assert.deepEqual((await rm.execute('SELECT code, kind FROM rm_modules')).rows.map((r) => [r['code'], r['kind']]), [['AB1234', 'course']]);
+    assert.ok(Number((await rm.execute("SELECT value FROM rm_health WHERE name = 'archived_files'")).rows[0]?.['value']) >= 1);
+  });
+
+  it('raises one ops alert, and carries on, when the read model cannot be published', async () => {
+    const h = await harness();
+    const dir = await mkdtemp(path.join(tmpdir(), 'rm-sync-'));
+    temps.push(dir);
+    const unmigrated = createClient({ url: `file:${path.join(dir, 'rm.sqlite')}` });
+    const out = await runSync(h.ctx(), { telegramApiBase: h.telegramUrl, graphBase: h.graph.graphBase, loginBase: h.graph.loginBase, readModel: unmigrated });
+    assert.equal(out.readModel, 'failed');
+    assert.notEqual(out.status, 'failed', 'the sync itself is unaffected');
+    assert.equal(ops(h).filter((t) => t.includes("dashboard's read model could not be updated")).length, 1);
   });
 });

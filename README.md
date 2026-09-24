@@ -239,6 +239,38 @@ overwrites; writes nowhere else.
    **OneDrive**. Full Disk Access is not needed. After a brew upgrade breaks
    the copy, run `node scripts/mirror-runtime.ts --refresh`.
 
+## The dashboard (Phase 8)
+
+A strictly read-only web view, in `dashboard/` (Next.js, on Vercel). It shows:
+- deadlines, with add-to-calendar links;
+- what is new since your last visit on that device;
+- recent activity and open follow-ups;
+- coverage and system health, overall and per module.
+
+It changes nothing (DECISIONS.md D-65).
+
+**It never touches the main database.** Each sync publishes a sanitised copy
+of what the dashboard shows into a **separate** Turso database, the read
+model. The dashboard holds a read-only token for that database alone.
+- The read model's schema cannot hold a token, a config value, a body or a
+  credential-bearing URL (CHECK constraints, tested).
+- Turso itself refuses the dashboard's token any write, and refuses it the
+  main database. `npm run readmodel -- verify` proves both.
+
+| Command | What it does |
+|---|---|
+| `npm run readmodel -- migrate` | Create the read model's tables (write token). |
+| `npm run readmodel -- verify` | Prove the token separation against Turso. All five checks must pass before deploying. |
+| `npm run readmodel -- publish` | Publish once now (the sync does it every run). |
+| `node dashboard/scripts/hash-password.ts` | Generate the dashboard password, its hash and the session secret. |
+| `npm run dashboard:smoke` | Build the dashboard and check it over HTTP on invented data. |
+
+Secrets live only in `.env` (gitignored, for local runs), GitHub Actions
+secrets (the sync's write token) and Vercel's Production environment (the
+dashboard's read token, password hash and session secret). A preview
+deployment is never built, is given no secrets, and would serve nothing if it
+were.
+
 ## Privacy posture
 
 This repository is public, which makes its GitHub Actions logs public with it.

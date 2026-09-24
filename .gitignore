@@ -34,3 +34,12 @@ mirror.config.json
 # leak-check's allowlist of generic short file names (DECISIONS.md D-62): real
 # names, so never committed.
 leak-check.allow
+
+# The dashboard (DECISIONS.md D-65): build output, Vercel link, and local env
+# files. Every dashboard secret lives only in Vercel's settings (or, for a local
+# preview, in dashboard/.env.local, which is never committed).
+dashboard/.next/
+dashboard/.vercel/
+dashboard/.env*
+dashboard/next-env.d.ts
+dashboard/*.tsbuildinfo

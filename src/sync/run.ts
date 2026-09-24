@@ -44,6 +44,8 @@ import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
 import { runArchive, tallyFailures, type ArchiveOutcome } from '../archive/stage.ts';
 import { runFollowups, type FollowupOutcome } from '../followups/stage.ts';
+import { publishReadModel } from '../readmodel/publish.ts';
+import { readModelClient, readModelConfigured } from '../readmodel/cli.ts';
 import { TokenProvider } from '../graph/auth.ts';
 import { GraphDrive } from '../graph/drive.ts';
 import { RequestGuard, SCOPES, type RootSpec } from '../graph/guard.ts';
@@ -94,6 +96,8 @@ export interface SyncOptions {
   /** Test seams: point Graph and the Microsoft login at a local fake. */
   graphBase?: string;
   loginBase?: string;
+  /** Test seam: the read model's database client (otherwise from the environment). */
+  readModel?: import('@libsql/client').Client;
 }
 
 export interface SyncOutcome {
@@ -108,6 +112,8 @@ export interface SyncOutcome {
   planned: Payload[];
   archive: ArchiveOutcome | null;
   followups: FollowupOutcome | null;
+  /** The dashboard's read model this run: null when not configured. */
+  readModel: 'published' | 'failed' | null;
 }
 
 export async function runSync(ctx: RunContext, options: SyncOptions = {}): Promise<SyncOutcome> {
@@ -305,7 +311,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
 }
 
 function empty(status: SyncOutcome['status']): SyncOutcome {
-  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null, followups: null };
+  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null, followups: null, readModel: null };
 }
 
 function buildTelegram(config: Config, ctx: RunContext, options: SyncOptions): TelegramClient | null {
@@ -497,6 +503,23 @@ async function syncBody(
   // No schedule condition is ever raised now; evaluating the prefix lets any
   // row left active by the old raise/resolve alert close itself.
   evaluatedPrefixes.push('schedule_health');
+
+  // --- the dashboard's read model (Phase 8): published to a SEPARATE database
+  // with its own write token, from environment only (D-65). Absent: skipped.
+  if (!ctx.dryRun && (options.readModel !== undefined || readModelConfigured())) {
+    try {
+      const target = options.readModel ?? readModelClient('write');
+      const published = await publishReadModel(ctx.db, target, now);
+      outcome.readModel = 'published';
+      ctx.log.info('readmodel.published', published);
+    } catch (error) {
+      outcome.readModel = 'failed';
+      // The error's class only: a message can quote a URL.
+      ctx.log.warn('readmodel.publish_failed', { error: error instanceof Error ? error.name : 'unknown' });
+      alerts.push({ key: 'dashboard_publish', severity: 'warn', summary: 'The dashboard\'s read model could not be updated this run; the dashboard shows the last good copy.' });
+    }
+    evaluatedPrefixes.push('dashboard_publish');
+  }
 
   outcome.alerts = await reconcileAlerts(ctx.db, now, alerts, evaluatedPrefixes);
   outcome.flush = await flush({ db: ctx.db, log: ctx.log, now, dryRun: ctx.dryRun }, telegram, chats);

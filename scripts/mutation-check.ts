@@ -35,6 +35,8 @@ const ARCHIVE = 'test/unit/archive.test.ts';
 const MIRROR = 'test/unit/mirror.test.ts';
 const FOLLOWUPS = 'test/unit/followups.test.ts';
 const CLI_FOLLOWUPS = 'test/unit/cli-followups.test.ts';
+const DASHBOARD = 'test/unit/dashboard.test.ts';
+const READMODEL = 'test/unit/readmodel.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -462,6 +464,98 @@ const MUTATIONS: Mutation[] = [
     to: '    `SELECT f.id, f.context_id, f.category, f.number, f.opened_at, f.nudged_at, c.module_code',
     tests: [CLI_FOLLOWUPS],
   },
+  // --- D-65: the dashboard and its read model --------------------------------
+  {
+    name: 'a page served without a session (the main view skips its own check)',
+    file: 'dashboard/app/page.tsx',
+    from: '  const { session, secrets } = await requireSession();',
+    to: "  const { session, secrets } = { session: { kind: 'verified-session' as const, expiresAt: 0 }, secrets: (await import('../lib/env.ts')).secrets()! };",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a page served without a session (the proxy lets the main view through)',
+    file: 'dashboard/proxy.ts',
+    from: "const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/login', '/api/login']);",
+    to: "const PUBLIC_PATHS: ReadonlySet<string> = new Set(['/login', '/api/login', '/']);",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a secret-bearing table copied into the read model (config, as a module code)',
+    file: 'src/readmodel/publish.ts',
+    from: 'COALESCE(c.module_code, g.module_code) AS code, COALESCE(c.followups_tracking, 0) AS tracked',
+    to: "(SELECT value FROM config WHERE key = 'canvas_token') AS code, COALESCE(c.followups_tracking, 0) AS tracked",
+    tests: [READMODEL],
+  },
+  {
+    name: 'a write statement in the dashboard',
+    file: 'dashboard/lib/readmodel.ts',
+    from: `readRows(session, secrets, "SELECT value FROM rm_meta WHERE name = 'published_at'"),`,
+    to: `readRows(session, secrets, "INSERT INTO rm_meta (name, value) VALUES ('seen', '1') RETURNING value"),`,
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a cacheable authenticated response',
+    file: 'dashboard/lib/headers.ts',
+    from: "'Cache-Control': 'no-store, max-age=0',",
+    to: "'Cache-Control': 'public, max-age=3600',",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'preview deployments exposing data',
+    file: 'dashboard/lib/env.ts',
+    from: "return env.VERCEL_ENV === 'production';",
+    to: "return env.VERCEL_ENV === 'production' || env.VERCEL_ENV === 'preview';",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'preview deployments enabled for every branch in vercel.json',
+    file: 'dashboard/vercel.json',
+    from: '"**": false,',
+    to: '"**": true,',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a session accepted without checking its signature',
+    file: 'dashboard/lib/session.ts',
+    from: '  if (!ok) return null;\n',
+    to: '',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a session cookie readable by page scripts (no HttpOnly)',
+    file: 'dashboard/lib/session.ts',
+    from: "const attrs = 'Path=/; HttpOnly; Secure; SameSite=Strict';",
+    to: "const attrs = 'Path=/; Secure; SameSite=Strict';",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the password script printing secrets under CI',
+    file: 'dashboard/scripts/hash-password.ts',
+    from: "if (process.env['CI'] !== undefined || process.env['GITHUB_ACTIONS'] !== undefined || process.env['VERCEL'] !== undefined) {",
+    to: 'if (false) {',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a login accepted from another site (no CSRF check)',
+    file: 'dashboard/app/api/login/route.ts',
+    from: "  if (!sameOrigin(request)) return new Response('Forbidden', { status: 403 });\n",
+    to: '',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'the dashboard SQL guard waves writes through',
+    file: 'dashboard/lib/sql-guard.ts',
+    from: "  if (WRITE_WORDS.test(text.replace(/'(?:[^']|'')*'/g, \"''\"))) throw new WriteRefused('a write keyword');\n",
+    to: '',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'a credential-bearing OneDrive link let into the read model schema',
+    file: 'src/readmodel/schema.ts',
+    from: "AND instr(lower(${col}), 'tempauth') = 0 ",
+    to: '',
+    tests: [READMODEL],
+  },
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -481,6 +575,12 @@ let problems = 0;
 try {
   for (const entry of COPY) cpSync(path.join(ROOT, entry), path.join(work, entry), { recursive: true });
   symlinkSync(path.join(ROOT, 'node_modules'), path.join(work, 'node_modules'));
+  // The dashboard's source, without its build output; its packages by symlink.
+  cpSync(path.join(ROOT, 'dashboard'), path.join(work, 'dashboard'), {
+    recursive: true,
+    filter: (src) => !/[\\/](node_modules|\.next)([\\/]|$)/.test(path.relative(ROOT, src)),
+  });
+  symlinkSync(path.join(ROOT, 'dashboard', 'node_modules'), path.join(work, 'dashboard', 'node_modules'));
 
   const allTests = [...new Set(MUTATIONS.flatMap((m) => m.tests))];
   const baseline = failures(work, allTests);

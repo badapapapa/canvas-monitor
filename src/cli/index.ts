@@ -32,6 +32,7 @@ import { runReroute, runRules } from './reroute.ts';
 import { runMirrorCli } from './mirror.ts';
 import { runFollowupsCli, runTunePatterns } from './followups.ts';
 import { runTimetableCli } from './timetable.ts';
+import { runReadModelCli } from '../readmodel/cli.ts';
 import { runBackfillCourse } from './backfill-course.ts';
 import { runConfigList, runSetConfig } from './set-config.ts';
 
@@ -64,6 +65,7 @@ Commands:
   timetable add --module <code> --weekday thu --time 09:00 --from YYYY-MM-DD --to YYYY-MM-DD [--label lab]
   timetable skip (--module <code> | --all) --date YYYY-MM-DD [--note "..."]
   timetable remove <id> | unskip <id> | import <draft.json>
+  readmodel migrate|verify|publish   The dashboard's separate read-model database (D-65).
   reroute --preview        Show where each _unsorted file would move. Moves nothing.
   reroute --apply <fp>     Move exactly the previewed plan, once per file (D-40, D-57).
   set-config <key>         Set a config value, read from stdin (never argv).
@@ -168,6 +170,10 @@ async function main(argv: string[]): Promise<number> {
       return await withoutRunRecord('migrate', dryRun);
     case 'mirror':
       return await runMirrorCli({ dryRun, baseline: values.baseline === true, config: values.config });
+    case 'readmodel':
+      // The main database is opened read-only: every write here goes to the
+      // SEPARATE read-model database, through its own token (D-65).
+      return await withReadOnlyRun('readmodel', unsafeLog, (ctx) => runReadModelCli(ctx, positionals[1]));
     case 'tune-patterns':
       return await withReadOnlyRun('tune-patterns', unsafeLog, (ctx) => runTunePatterns(ctx));
     case 'followups':
