@@ -272,6 +272,24 @@ dashboard's read token, password hash and session secret). A preview
 deployment is never built, is given no secrets, and would serve nothing if it
 were.
 
+### Redeploying the dashboard
+
+The dashboard is deployed from this Mac with the Vercel CLI. Vercel has no
+access to GitHub (DECISIONS.md D-70). Commit first (`git status` clean), then,
+in one Terminal window:
+
+```
+export npm_config_ignore_scripts=true VERCEL_TELEMETRY_DISABLED=1
+npx --yes vercel@59.19.1 login
+cd dashboard
+npx --yes vercel@59.19.1 deploy --prod
+npx --yes vercel@59.19.1 logout
+```
+
+Always `--prod`: a plain `deploy` makes a preview, which has no secrets and
+serves nothing. Logging out revokes the CLI's token. If `link` or `deploy` ever
+offers to connect a Git repository, answer No.
+
 ### Revoking access
 
 Change `DASHBOARD_SESSION_SECRET` in Vercel (Production), then **redeploy**:

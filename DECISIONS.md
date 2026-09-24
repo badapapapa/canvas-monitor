@@ -2652,3 +2652,59 @@ A test runs it against a fake `pbcopy` and checks:
 
 **Two mutation-check entries (88 in total):** printing a value in clipboard
 mode, and not clearing the clipboard.
+
+---
+
+## D-70 — The dashboard is deployed with the Vercel CLI; Vercel gets no GitHub access · approved 2026-09-24
+
+**Decision (the owner's):** the dashboard is deployed from the owner's Mac with
+the Vercel CLI, **not** by importing the repository into Vercel. The Vercel
+GitHub app is never installed. This replaces the repository import planned in
+D-65 and the owner's step-4 brief.
+
+**Why.**
+- **The app's permissions reach too far.** Vercel's GitHub app asks for write
+  access to a repository's code, workflows and administration (Vercel
+  changelog, 17 March 2026, which added the workflows permission).
+- **This repository's sync workflow runs its code with the main database
+  token**, which reaches the Canvas, OneDrive and Telegram tokens. Anyone
+  controlling Vercel's GitHub access could change that code, or add a
+  workflow, and read it.
+- **No repository rule could contain it.** Administration access can change
+  branch rules. And secrets reach workflows on any branch pushed to the
+  repository.
+- **The CLI route avoids all of it.** Vercel then holds only what the
+  dashboard itself needs.
+
+**How:**
+- **CLI version:** `vercel@59.19.1`, pinned and at least a week old, run with
+  `npm_config_ignore_scripts=true` and `VERCEL_TELEMETRY_DISABLED=1`.
+- **Project setup:** `vercel link`, then `vercel deploy --prod`, both from
+  `dashboard/`. So the project root is `dashboard/`, and `vercel.json`'s
+  `npm ci --ignore-scripts` applies. When `link` offers to connect a Git
+  repository, the answer is No. `.vercelignore` keeps `.env*`, `.next`,
+  `node_modules` and `.vercel` out of the upload.
+- **Only committed code is deployed:** `git status` must be clean first.
+- **No automatic previews:** with no Git connection, pushes build nothing.
+  A preview exists only if someone runs `vercel deploy` without `--prod`. It
+  would get no secrets (all four are Production-only), and the code serves it
+  404 anyway (D-65).
+- **The CLI's token exists only between `vercel login` and `vercel logout`.**
+  Logging out revokes it. While it exists, it can control the Vercel project,
+  including deploying code that could read the read-only token, which reaches
+  only the sanitised read model. It cannot read Sensitive values back, and it
+  has no GitHub or main-database access.
+- **Environment variables** go in with
+  `vercel env add NAME production --sensitive`, their values piped from
+  `.env` or from the clipboard (D-69). None appears on screen.
+- **Deployment Protection:** Vercel Authentication, scope All Deployments
+  (D-66). Protection Bypass for Automation, Shareable Links and the OPTIONS
+  Allowlist are left unused.
+- **Rate limit:** one WAF rule, fixed window, 5 POSTs to `/api/login` per IP
+  per 60 s.
+
+**Cost, accepted:** redeploying is manual: log in, deploy, log out (README,
+"Redeploying the dashboard"). The dashboard changes rarely.
+
+`vercel.json` keeps `git.deploymentEnabled` (main only) as a guard, in case a
+Git connection is ever added by mistake.
