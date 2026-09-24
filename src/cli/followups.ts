@@ -18,7 +18,7 @@ import type { RunContext } from '../core/run-context.ts';
 import type { Db } from '../core/db/writer.ts';
 import { followupLabel, type FollowupCategory } from '../followups/classify.ts';
 import { planFollowups, type ExistingFollowup, type Plan } from '../followups/plan.ts';
-import { fetchTermEnds, loadExisting, loadPhrases, loadTimetable, loadTrackedFiles, loadTrackingOff, reminderMessage, trackingSummary } from '../followups/stage.ts';
+import { fetchTermEnds, loadExisting, loadOpenItems, loadPhrases, loadTimetable, loadTrackedFiles, loadTrackingOff, reminderMessage, trackingSummary } from '../followups/stage.ts';
 import { contextOf, loadDraft, parseDate } from '../followups/draft.ts';
 import { lastLessonBefore, planReminder, REMINDER_TIME_SGT, sgtDate, sgtInstant } from '../followups/timetable.ts';
 import { tunePatterns } from '../followups/tune.ts';
@@ -108,9 +108,14 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
       // As if follow-ups had gone live before that morning and nothing else arrived.
       const date = parseDate(args.reminderDate);
       const at = sgtInstant(date, REMINDER_TIME_SGT);
-      const open = plan.opens.map((o, i) => ({ followupId: -(i + 1), contextId: o.contextId, moduleCode: o.moduleCode, category: o.category, number: o.number, openedAt: o.postedAt }));
+      // Open = open in the database now (once live), plus what this run would
+      // open, minus what it would close or expire; tracking-off modules excluded.
+      const leaving = new Set([...plan.closes, ...plan.expires].map((c) => c.followupId));
+      const stored = migrated ? (await loadOpenItems(ctx.db)).filter((o) => !leaving.has(o.followupId) && !trackingOff.has(o.contextId)) : [];
+      const fresh = plan.opens.map((o, i) => ({ followupId: -(i + 1), contextId: o.contextId, moduleCode: o.moduleCode, category: o.category, number: o.number, openedAt: o.postedAt }));
+      const open = [...stored, ...fresh];
       const decision = planReminder({ now: at, timetable, open, liveSince: '1970-01-01T00:00:00Z' });
-      out.write(`\nTHE REMINDER AT ${REMINDER_TIME_SGT} SGT ON ${date} (assuming only what is open now)\n`);
+      out.write(`\nTHE REMINDER AT ${REMINDER_TIME_SGT} SGT ON ${date} (assuming only what is open now, and nothing new arrives)\n`);
       if (decision.plan === null) out.write(`  none: ${decision.reason}\n`);
       else {
         const m = reminderMessage(decision.plan, at);
@@ -144,7 +149,7 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
   if (args.action === 'list') {
     const all = args.rest.includes('--all');
     const r = await ctx.db.read({
-      sql: `SELECT f.id, f.category, f.number, f.state, f.opened_at, f.nudged_at, f.close_reason, c.module_code, i.title
+      sql: `SELECT f.id, f.category, f.number, f.state, f.opened_at, f.close_reason, c.module_code, i.title
               FROM followups f JOIN courses c ON c.context_id = f.context_id JOIN items i ON i.id = f.question_file_id
              WHERE f.state = 'open' OR ? = 1 ORDER BY c.module_code, f.category, CAST(f.number AS INTEGER)`,
       args: [all ? 1 : 0],
@@ -152,8 +157,8 @@ export async function runFollowupsCli(ctx: RunContext, args: { action: string | 
     if (r.rows.length === 0) out.write(`\nNo ${all ? '' : 'open '}follow-ups.\n\n`);
     for (const x of r.rows) {
       const label = `${String(x['module_code'])} ${followupLabel(String(x['category']) as FollowupCategory, String(x['number']))}`;
-      out.write(`#${String(x['id']).padEnd(4)} ${label.padEnd(22)} ${String(x['state']).padEnd(9)} since ${day(String(x['opened_at']))}` +
-        `${x['nudged_at'] === null ? '' : '  nudged'}${x['close_reason'] === null ? '' : `  (${String(x['close_reason'])})`}   ${String(x['title'])}\n`);
+      out.write(`#${String(x['id']).padEnd(4)} ${label.padEnd(22)} ${String(x['state']).padEnd(9)} posted ${day(String(x['opened_at']))}` +
+        `${x['close_reason'] === null ? '' : `  (${String(x['close_reason'])})`}   ${String(x['title'])}\n`);
     }
     return 0;
   }

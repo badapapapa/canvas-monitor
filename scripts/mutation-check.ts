@@ -34,6 +34,7 @@ const GRAPH = 'test/unit/graph.test.ts';
 const ARCHIVE = 'test/unit/archive.test.ts';
 const MIRROR = 'test/unit/mirror.test.ts';
 const FOLLOWUPS = 'test/unit/followups.test.ts';
+const CLI_FOLLOWUPS = 'test/unit/cli-followups.test.ts';
 
 const MUTATIONS: Mutation[] = [
   {
@@ -438,6 +439,28 @@ const MUTATIONS: Mutation[] = [
     from: 'export const postedOf = (f: TrackedFile): string => f.postedAt ?? f.firstSeenAt;',
     to: 'export const postedOf = (f: TrackedFile): string => f.firstSeenAt;',
     tests: [FOLLOWUPS],
+  },
+  // --- the column the reshaped 0010 removed, reintroduced --------------------
+  {
+    name: 'followups list selects nudged_at, a column migration 0010 no longer has (the live bug)',
+    file: 'src/cli/followups.ts',
+    from: 'SELECT f.id, f.category, f.number, f.state, f.opened_at, f.close_reason, c.module_code, i.title',
+    to: 'SELECT f.id, f.category, f.number, f.state, f.opened_at, f.nudged_at, f.close_reason, c.module_code, i.title',
+    tests: [CLI_FOLLOWUPS],
+  },
+  {
+    name: 'followups dismiss writes nudged_at, a column migration 0010 no longer has',
+    file: 'src/cli/followups.ts',
+    from: "SET state = 'dismissed', closed_at = ?, close_reason = 'dismissed'",
+    to: "SET state = 'dismissed', nudged_at = NULL, closed_at = ?, close_reason = 'dismissed'",
+    tests: [CLI_FOLLOWUPS],
+  },
+  {
+    name: 'the lesson-day reminder reads nudged_at, a column migration 0010 no longer has',
+    file: 'src/followups/stage.ts',
+    from: '    `SELECT f.id, f.context_id, f.category, f.number, f.opened_at, c.module_code',
+    to: '    `SELECT f.id, f.context_id, f.category, f.number, f.opened_at, f.nudged_at, c.module_code',
+    tests: [CLI_FOLLOWUPS],
   },
 ];
 

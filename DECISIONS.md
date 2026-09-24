@@ -2136,3 +2136,42 @@ names in the repository would itself be the leak. Proven by planting one: it
 was reported in the working tree and in the object store, then removed and
 pruned. Short announcement and assignment titles ("Quiz 1") stay out of scope:
 they are not file names, and they match everything.
+
+---
+
+## D-63 — A stale column in `followups list`, and the tests that now catch it · fixed 2026-09-24
+
+After go-live, `npm run followups -- list` failed: `no such column:
+f.nudged_at`. Reshaping migration 0010 for D-62 removed that column, and only
+that one (checked by diffing 0010 as first built against 0010 as shipped). The
+`list` query still selected it. No test ran the follow-up CLI against a
+migrated schema, so nothing failed.
+
+**Fixed.** `list` no longer selects it. No other code references the column:
+`dismiss` never did, and neither does the lesson-day reminder path
+(`loadOpenItems`, `loadTimetable`, the day-keyed enqueue). Both the new `list`
+query and the reminder query were run read-only against production and
+returned the four open follow-ups. `list` now labels the date "posted",
+because since D-62 `opened_at` is Canvas's posted date. **No migration and no
+production data change was needed.**
+
+**A second bug the new test found:** `followups preview --reminder-date`
+simulated only follow-ups the first run *would open*. Once live, those are
+already in the database, so the preview would have reported no reminder for
+any date. It now uses what is open in the database, plus what would newly
+open, minus what would close or expire.
+
+**The test (`test/unit/cli-followups.test.ts`)** runs, against a freshly
+migrated database:
+- every follow-up subcommand: `list`, `list --all`, `dismiss` (including a
+  repeat and `--dry-run`), `module off` and `on`, `phrases add` and list, and
+  `preview` from the database and from a draft, with a reminder date;
+- `tune-patterns`;
+- every timetable subcommand: `add`, `skip`, `list`, `remove`, `unskip`,
+  `import`;
+- the sync stage directly: a lesson-day reminder on Thursday 1 October at
+  07:10 SGT, then term-end expiry.
+
+A query naming a column the schema lacks now fails the build. Three
+mutation-check entries put the removed column back into `list` (the live bug),
+`dismiss`, and the reminder path's query; all three are caught.
