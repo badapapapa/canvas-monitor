@@ -226,3 +226,30 @@ export function dashboardTokenExpiryCondition(daysRemaining: number | null): Ale
     rotate: "Rotate it: README, 'Rotating the dashboard's read-only token'.",
   }, daysRemaining);
 }
+
+/**
+ * Close, WITHOUT a message, the per-context alerts (`coverage:N`,
+ * `context_stale:N`) of contexts no longer watched: disabled in the seed, like
+ * a project group left for another (DECISIONS.md D-72). "Resolved" would be
+ * untrue: nothing was fixed, the context was retired. Left alone, such an
+ * alert would stay active for ever, since a disabled context is never
+ * evaluated again, and would count on the dashboard's health line.
+ */
+export async function retireContextAlerts(db: Db, watched: ReadonlySet<number>, now: Date): Promise<string[]> {
+  const rows = await db.read(
+    "SELECT alert_key FROM ops_alerts WHERE resolved_at IS NULL AND (alert_key LIKE 'coverage:%' OR alert_key LIKE 'context_stale:%')",
+  );
+  const retire = rows.rows
+    .map((r) => String(r['alert_key']))
+    .filter((key) => {
+      const id = Number(key.slice(key.indexOf(':') + 1));
+      return Number.isInteger(id) && !watched.has(id);
+    });
+  for (const key of retire) {
+    await db.write.execute('retire context alert', {
+      sql: 'UPDATE ops_alerts SET resolved_at = ? WHERE alert_key = ? AND resolved_at IS NULL',
+      args: [now.toISOString(), key],
+    });
+  }
+  return retire;
+}

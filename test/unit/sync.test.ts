@@ -654,6 +654,54 @@ describe('sync end to end', () => {
     assert.equal(ops(h).length, 1);
   });
 
+  it("says plainly, as a course, when its files cannot be read, with no decision number", async () => {
+    Object.assign(h.state.courses[10001] as FakeCourse, { files: 403, modules: 403 });
+    await sync(h);
+    const text = ops(h)[0]?.text ?? '';
+    assert.match(text, /If the course has ended, files not already archived can no longer be fetched/);
+    assert.doesNotMatch(text, /D-\d/);
+  });
+
+  async function addGroup(): Promise<void> {
+    await h.client.execute(`INSERT INTO contexts (context_id, context_type, canvas_id, enabled, coverage_status, first_seen_at)
+                            VALUES (3, 'group', 20001, 1, 'unknown', '2026-09-10T00:00:00Z')`);
+    await h.client.execute(`INSERT INTO groups (context_id, canvas_group_id, parent_canvas_course_id, parent_context_id, module_code, term)
+                            VALUES (3, 20001, 10001, 1, 'AB1234', '2610')`);
+  }
+
+  it('a group that refuses its files is described as a group: left or moved, no course, no decision number (D-72)', async () => {
+    await addGroup();
+    h.state.groups[20001] = { files: [], folders: [] };
+    await sync(h);
+    h.sent.length = 0;
+    h.state.groups[20001] = { files: 403, folders: 403 };
+    await sync(h);
+    const text = ops(h).map((m) => m.text).join('\n');
+    assert.match(text, /AB1234 · group: this group's files can no longer be read/);
+    assert.match(text, /left it or been moved to another group/);
+    assert.doesNotMatch(text, /course|concluded|Modules|unrecoverable/i);
+    assert.doesNotMatch(text, /D-\d/);
+  });
+
+  it('retiring a context closes its alerts quietly: no "Resolved", nothing left active (D-72)', async () => {
+    await addGroup();
+    h.state.groups[20001] = { files: [], folders: [] };
+    await sync(h);
+    h.state.groups[20001] = { files: 403, folders: 403 };
+    await sync(h);
+    const before = await h.client.execute("SELECT resolved_at FROM ops_alerts WHERE alert_key = 'coverage:3'");
+    assert.equal(before.rows[0]?.['resolved_at'], null, 'the alert is active');
+    h.sent.length = 0;
+
+    await h.client.execute('UPDATE contexts SET enabled = 0 WHERE context_id = 3'); // the seed disables it
+    await sync(h);
+    const after = await h.client.execute("SELECT resolved_at FROM ops_alerts WHERE alert_key = 'coverage:3'");
+    assert.notEqual(after.rows[0]?.['resolved_at'], null, 'closed');
+    assert.equal(ops(h).length, 0, 'retired, not "Resolved": no message');
+    const active = await h.client.execute("SELECT count(*) AS n FROM ops_alerts WHERE resolved_at IS NULL AND alert_key LIKE '%:3'");
+    assert.equal(active.rows[0]?.['n'], 0);
+  });
+
   it('watches enabled groups for files, labelled by their module', async () => {
     await h.client.execute(`INSERT INTO contexts (context_id, context_type, canvas_id, enabled, coverage_status, first_seen_at)
                             VALUES (3, 'group', 20001, 1, 'unknown', '2026-09-10T00:00:00Z')`);

@@ -37,7 +37,7 @@ import {
   type ItemRecord,
   type ResourceType,
 } from '../ingest/normalise.ts';
-import { dashboardTokenExpiryCondition, reconcileAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
+import { dashboardTokenExpiryCondition, reconcileAlerts, retireContextAlerts, tokenExpiryCondition, type AlertCondition, type ReconcileOutcome } from '../notify/ops.ts';
 import { enqueueContent, enqueueNotice, enqueueOps, enqueueWatching, flush, type FlushOutcome } from '../notify/queue.ts';
 import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
@@ -253,7 +253,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
       severity: 'critical',
       summary: 'The OneDrive app registration is missing, or its directory has been blocked for inactivity. Files are not being archived.',
       detail:
-        `${a.stopDetail ?? ''}. Signing in again will not fix this (DECISIONS.md D-53). Check entra.microsoft.com: ` +
+        `${a.stopDetail ?? ''}. Signing in again will not fix this. Check entra.microsoft.com: ` +
         'a directory blocked for inactivity (AADSTS5000225) can be reactivated through Microsoft support only within ' +
         '20 days; after that, register a new app (README, Going live, Phase 4) and run npm run graph-login.',
     });
@@ -264,7 +264,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
       severity: 'critical',
       summary: 'OneDrive refuses this app as read-only or "pending provisioning". Files are not being archived.',
       detail:
-        'A known Microsoft regression since Aug 2026 for newly consented AppFolder-only apps (DECISIONS.md D-51). ' +
+        'A known Microsoft regression since Aug 2026 for newly consented AppFolder-only apps. ' +
         'User-reported workaround: npm run graph-login -- --scope full once, remove the app at ' +
         'https://account.live.com/consent/Manage, then npm run graph-login again.',
     });
@@ -279,7 +279,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
       key: 'storage@unreadable',
       severity: 'warn',
       summary: 'OneDrive quota is not readable with this scope, so the 80% storage alert is off.',
-      detail: 'A full drive still alerts, from the upload itself. It was readable under Files.ReadWrite.AppFolder at sign-in (D-51), so this is a change.',
+      detail: 'A full drive still alerts, from the upload itself. It was readable under Files.ReadWrite.AppFolder at sign-in, so this is a change.',
       remindEveryMs: null,
     });
   } else if (a.quota !== null && a.quota.total > 0) {
@@ -529,6 +529,9 @@ async function syncBody(
     evaluatedPrefixes.push('dashboard_publish');
   }
 
+  // Before reconciling: a retired context's alerts close quietly, not as "Resolved" (D-72).
+  const retired = await retireContextAlerts(ctx.db, new Set(contexts.map((c) => c.contextId)), now);
+  if (retired.length > 0) ctx.log.info('sync.alerts_retired', { keys: retired });
   outcome.alerts = await reconcileAlerts(ctx.db, now, alerts, evaluatedPrefixes);
   outcome.flush = await flush({ db: ctx.db, log: ctx.log, now, dryRun: ctx.dryRun }, telegram, chats);
 
@@ -746,7 +749,7 @@ async function syncContext(
       announcements.kind !== 'ok'
         ? { status: statusOf(announcements), records: [], detail: describe(announcements) }
         : announcements.value.length === 0 && !readable
-          ? { status: 'unverified', records: [], detail: 'empty list, and no other endpoint confirmed readability (D-38)' }
+          ? { status: 'unverified', records: [], detail: 'empty list, and no other endpoint confirmed the course is readable' }
           : {
               status: 'ok',
               records: announcements.value
@@ -1054,6 +1057,18 @@ function coverageAlert(context: SyncContext, coverage: CoverageStatus, linked: n
       remindEveryMs: null,
     };
   }
+  if (coverage === 'none' && context.contextType === 'group') {
+    return {
+      key: `coverage:${context.contextId}`,
+      severity: 'warn',
+      summary: `${context.label}: this group's files can no longer be read.`,
+      detail:
+        'Canvas refuses the group, which usually means you have left it or been moved to another group. ' +
+        'No new file here will be detected. Files already archived are safe. If you have a new group, ' +
+        'run discovery to add it and disable this one (README, "A group changed").',
+      remindEveryMs: null,
+    };
+  }
   if (coverage === 'none') {
     return {
       key: `coverage:${context.contextId}`,
@@ -1061,7 +1076,7 @@ function coverageAlert(context: SyncContext, coverage: CoverageStatus, linked: n
       summary: `${context.label}: files are not readable at all.`,
       detail:
         'Neither the Files tab nor Modules can be read, so no new file here will be detected. ' +
-        'If the course has concluded, anything not already archived is now unrecoverable (D-36).',
+        'If the course has ended, files not already archived can no longer be fetched.',
       remindEveryMs: null,
     };
   }

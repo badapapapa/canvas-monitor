@@ -2863,3 +2863,99 @@ decision, to be recorded when made.
 
 **The README** now has "Where every secret lives" (the table as live),
 "Checking the live site", and revised redeploy, revocation and rotation steps.
+
+---
+
+## D-72 — A switched project group; messages never cite decision numbers; the calendar button stays · 2026-09-25
+
+**Add-to-calendar: kept as it is (the owner's decision).** It works on the
+laptop, where events are usually added. On the iPhone the Google Calendar app
+drops the event details, and the owner confirmed the same with a
+`www.google.com/calendar/render` link. So there is no phone fix to build.
+Deadlines also reach Google Calendar through the owner's subscription to the
+Canvas calendar feed.
+
+**The Vercel CLI plugin preference is set** (D-71): the owner ran the command,
+and the file shows `"pluginDeclined": true` and `"pluginAutoUpdate": false`.
+
+**A module's project group was switched.** At 10:02 SGT on 2026-09-25 the ops
+chat reported the group's files unreadable. Checked read-only against the real
+Canvas API and database. Only statuses, times and yes/no answers were printed;
+no names or ids, and none are recorded here.
+- **The old group now refuses the token.** Canvas answers `403` for the group,
+  its files and its folders, with a not-authorised reason. That fits the owner
+  having been moved out of it.
+  - The last sync to read its files started at 09:44 SGT and finished `ok`.
+  - The next, at 10:02 SGT, got the 403, raised the alert, and finished
+    `partial`.
+- **Nothing was lost:** the old group never had a file.
+- **The new group:** the owner's groups in that module's parent course now
+  number exactly one, and it is not the old one. It is readable (files `200`),
+  has no files yet, and is not in the database. Its name contains "41" but is
+  not literally "Group 41"; the owner is to confirm it in Canvas.
+
+**Retiring a context closes its alerts quietly.**
+- **The problem:** a disabled context is never evaluated again, so its
+  `coverage:N` alert would have stayed active for ever, counted on the
+  dashboard's health line. (`context_stale:N` would have been "Resolved",
+  which is untrue.)
+- **The fix:** before reconciling, the sync closes, without a message, every
+  per-context alert whose context is not enabled. "Resolved" would claim a fix;
+  the context was retired.
+
+**`npm run seed-groups`: the usual path, confined to groups.**
+- A fresh `discover --out var/seed-new.json` is compared with the reviewed
+  `courses.seed.json`:
+  - a new group is added, following its parent course **as reviewed** (module
+    code, enabled), not the fresh proposal;
+  - an enabled group no longer listed is disabled ("no longer a member"),
+    never deleted;
+  - nothing else is touched.
+- It shows the plan, and writes with `--write` after a backup under `var/`.
+  The result is checked with the seed loader's own validation first.
+- It prints module codes and actions only. It is local-files only: no Canvas,
+  no database.
+- `seed-courses` then loads it as always.
+- README: "A group changed".
+
+**What the first sync of the new group does:**
+- Its files, none today, are baselined: recorded as seen, not announced one
+  by one (D-41).
+- One "Now watching" message names it.
+- Baselined files are still archived to OneDrive, silently. Any run archiving
+  ten or more sends one summary.
+- New files after that are announced and archived as usual.
+- Group files route to `Group`, so they open no follow-ups.
+- On the dashboard, the module list is the enabled contexts, so the new group
+  replaces the old.
+
+**The group alert's wording.** It used to say "Neither the Files tab nor
+Modules can be read… If the course has concluded… (D-36)". For a group that
+was wrong on three counts:
+- groups have no Modules fallback;
+- it was a group, not a concluded course;
+- it cited a decision number.
+
+A group now says its files can no longer be read, that this usually means the
+owner has left it or been moved, that archived files are safe, and to run
+discovery (README, "A group changed").
+
+**The owner's rule: messages never cite decision numbers.** They are for
+acting on, not for cross-referencing this repository. Three layers:
+- **The source strings:** every alert text that could reach Telegram was
+  rewritten: coverage, the OneDrive app registration, provisioning, storage,
+  and the unverified-announcements detail.
+- **A static test:** the build fails if a string in any runtime module
+  contains a decision number. CLI help, discovery reports and config
+  descriptions are exempt, because they only appear in the owner's terminal.
+- **A render-time backstop:** ops alerts and notices, which are our own words,
+  have any decision reference stripped. Canvas's own words in content messages
+  are never altered, and a test checks that.
+
+**Mutation-check, 6 new entries (98 in total), all caught:**
+- a group described as a concluded course;
+- a retired context's alert left active;
+- a decision number rendered in an ops message;
+- a decision number back in an alert text;
+- seed-groups filing a new group under the fresh proposal;
+- seed-groups leaving a left group enabled.

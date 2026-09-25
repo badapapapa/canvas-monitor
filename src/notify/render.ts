@@ -315,10 +315,27 @@ export function renderWatching(payload: WatchingPayload): string[] {
   );
 }
 
+/**
+ * The owner's rule (DECISIONS.md D-72): messages never cite a decision number.
+ * They are for acting on, not for cross-referencing this repository. Applied
+ * to OUR words only -- ops alerts and notices -- never to Canvas's own text,
+ * which is shown as Canvas wrote it. The source strings are kept clean too
+ * (a test scans them); this is the backstop for one that slips through.
+ */
+export function withoutDecisionRefs(text: string): string {
+  return text
+    .replace(/\s*\((?:see\s+)?(?:DECISIONS\.md\s+)?D-\d+[a-z]?(?:\s*,\s*D-\d+[a-z]?)*\)/g, '')
+    .replace(/[\s,;:-]*(?:see\s+)?(?:DECISIONS\.md\s+)?\bD-\d+[a-z]?\b/g, '')
+    .replace(/ {2,}/g, ' ')
+    .replace(/ ([.,;:])/g, '$1')
+    .trim();
+}
+
 export function renderOps(payload: OpsPayload): string[] {
   const icon = payload.resolved === true ? '✅' : payload.severity === 'critical' ? '🚨' : '⚠️';
-  const head = payload.resolved === true ? `${icon} <b>Resolved</b>: ${escapeHtml(payload.summary)}` : `${icon} ${escapeHtml(payload.summary)}`;
-  return pack(head, `${icon} continued`, payload.detail === undefined ? [] : [escapeHtml(payload.detail)]);
+  const summary = escapeHtml(withoutDecisionRefs(payload.summary));
+  const head = payload.resolved === true ? `${icon} <b>Resolved</b>: ${summary}` : `${icon} ${summary}`;
+  return pack(head, `${icon} continued`, payload.detail === undefined ? [] : [escapeHtml(withoutDecisionRefs(payload.detail))]);
 }
 
 export function render(payload: Payload, now: Date): string[] {
@@ -330,7 +347,7 @@ export function render(payload: Payload, now: Date): string[] {
     case 'ops':
       return renderOps(payload);
     case 'notice':
-      return pack(`📦 <b>${escapeHtml(payload.title)}</b>`, '📦 continued', payload.lines.map((l) => escapeHtml(l)));
+      return pack(`📦 <b>${escapeHtml(withoutDecisionRefs(payload.title))}</b>`, '📦 continued', payload.lines.map((l) => escapeHtml(withoutDecisionRefs(l))));
   }
 }
 

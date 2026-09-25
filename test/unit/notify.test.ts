@@ -1,6 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { after, describe, it } from 'node:test';
-import { escapeHtml, formatSgt, pack, relativeTo, render, renderDigest, type ContentPayload } from '../../src/notify/render.ts';
+import { escapeHtml, formatSgt, pack, relativeTo, render, renderDigest, withoutDecisionRefs, type ContentPayload } from '../../src/notify/render.ts';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
 import { batchKey } from '../../src/notify/queue.ts';
 import { dashboardTokenExpiryCondition, tokenExpiryCondition } from '../../src/notify/ops.ts';
 import { MESSAGE_LIMIT, TelegramClient } from '../../src/notify/telegram.ts';
@@ -314,5 +316,42 @@ describe('alert evaluation scope', () => {
     assert.equal(evaluated('context_stale:10', ['context_stale:']), true);
     assert.equal(evaluated('token_expiry@7', ['token_expiry@']), true);
     assert.equal(evaluated('canvas_auth_other', ['canvas_auth']), false);
+  });
+});
+
+describe('messages never cite a decision number (D-72)', () => {
+  it('ops alerts and notices are cleaned at render time', () => {
+    const [ops] = render({ kind: 'ops', severity: 'warn', summary: 'Something broke (D-36).', detail: 'Signing in will not fix this (DECISIONS.md D-53). See DECISIONS.md D-51.' }, NOW);
+    assert.ok(ops !== undefined && !/D-\d/.test(ops), ops);
+    assert.match(ops, /Something broke\./);
+    const [notice] = render({ kind: 'notice', title: 'Saved (D-41)', lines: ['A line (D-40, D-47).'] }, NOW);
+    assert.ok(notice !== undefined && !/D-\d/.test(notice), notice);
+  });
+
+  it("leaves Canvas's own words alone", () => {
+    assert.equal(withoutDecisionRefs('Plain text: 3 items, AB-1234, D-day.'), 'Plain text: 3 items, AB-1234, D-day.');
+    const [msg] = render(payload([{ resourceType: 'announcement', kind: 'new', title: 'Room D-12 moved', url: 'https://canvas.example/courses/1/discussion_topics/9', change: null, postedAt: null, dueAt: null, preview: 'Now in D-12.' }]), NOW);
+    assert.ok(msg !== undefined && msg.includes('Room D-12 moved'), 'a Canvas title was altered');
+  });
+
+  it('no runtime module that can reach Telegram has a decision number in its text', () => {
+    // Terminal-only code may cite decisions (CLI help, discovery reports, config descriptions).
+    const TERMINAL_ONLY = [/^src\/cli\//, /^src\/discover\//, /^src\/core\/config\.ts$/, /^src\/readmodel\/cli\.ts$/];
+    const walk = (d: string): string[] => readdirSync(d).flatMap((f) => {
+      const p = path.join(d, f);
+      return statSync(p).isDirectory() ? walk(p) : p.endsWith('.ts') ? [p] : [];
+    });
+    const offenders: string[] = [];
+    for (const file of walk('src')) {
+      if (TERMINAL_ONLY.some((re) => re.test(file))) continue;
+      const code = readFileSync(file, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .split('\n')
+        .map((l) => l.replace(/(^|\s)\/\/.*$/, ''));
+      code.forEach((line, i) => {
+        if (/['"`][^'"`]*\bD-\d{2}\b/.test(line)) offenders.push(`${file}:${i + 1}`);
+      });
+    }
+    assert.deepEqual(offenders, [], 'a message could cite a decision number');
   });
 });

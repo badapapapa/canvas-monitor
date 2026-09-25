@@ -216,6 +216,54 @@ passed without answers. Everything still open closes at term end
 | `npm run timetable -- list` | My lessons (personal: database only). `add`, `skip`, `remove`, `unskip`, `import`. |
 | `npm run followups -- preview --draft <file> --reminder-date <date>` | Read-only: a draft timetable's effect, and one morning's reminder. |
 
+## A group changed
+
+When a project group is switched, the old group starts refusing the token.
+The ops chat says its files can no longer be read. The fix is the usual
+discovery and seed path, confined to groups (DECISIONS.md D-72). Run it from
+the repository root, locally:
+
+1. Write a fresh discovery **beside** the reviewed seed file, not over it:
+   ```
+   npm run discover -- --out var/seed-new.json
+   ```
+2. See which groups changed, then apply only that, with a backup under
+   `var/`:
+   ```
+   npm run seed-groups
+   npm run seed-groups -- --write
+   ```
+   - A new group follows its parent course as you reviewed it.
+   - A group you left is disabled, not deleted.
+   - Everything else in `courses.seed.json` is untouched.
+3. Load it. This changes the production database:
+   ```
+   npm run seed-courses -- --dry-run
+   npm run seed-courses
+   ```
+4. Optionally, preview the next run's messages without sending or writing
+   anything:
+   ```
+   npm run sync -- --dry-run
+   ```
+5. Delete the discovery file, which names your real courses and groups
+   (`var/` is gitignored and blocked by the commit hook anyway):
+   ```
+   rm var/seed-new.json
+   ```
+
+**What the next sync does:**
+- The new group's existing files are recorded as seen, not announced one by
+  one.
+- One "Now watching" message names it.
+- Its files are archived to OneDrive (under the module's `Group` folder)
+  silently. A run that archives ten or more sends one "Saved to OneDrive"
+  summary.
+- From then on, its new files are announced and archived as usual.
+- The old group's alert closes quietly: no "Resolved", because nothing was
+  fixed.
+- Files archived from the old group stay where they are.
+
 ## The local mirror (optional, Mac only)
 
 Copies files archived **from now on** into your own module folders, under

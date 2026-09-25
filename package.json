@@ -33,7 +33,8 @@
     "timetable": "node src/cli/index.ts timetable",
     "readmodel": "node src/cli/index.ts readmodel",
     "dashboard:smoke": "node scripts/dashboard-smoke.ts",
-    "dashboard:preview": "node scripts/dashboard-preview.ts"
+    "dashboard:preview": "node scripts/dashboard-preview.ts",
+    "seed-groups": "node scripts/seed-groups.ts"
   },
   "dependencies": {
     "@libsql/client": "^0.15.0"
