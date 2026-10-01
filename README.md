@@ -286,6 +286,44 @@ overwrites; writes nowhere else.
    Privacy & Security → **Files and Folders**, find that node binary and tick
    **OneDrive**. Full Disk Access is not needed. After a brew upgrade breaks
    the copy, run `node scripts/mirror-runtime.ts --refresh`.
+8. **Keep the archive on this Mac.** In Finder, right-click
+   `OneDrive/Apps/Canvas Archive` and choose **Always Keep on This Device**.
+   Otherwise OneDrive leaves files online-only, and macOS refuses to download
+   them for a background job. The mirror then defers them with "Unknown system
+   error -11" (D-73).
+
+### Hands off the archive
+
+`OneDrive/Apps/Canvas Archive` is the system's record, not a working folder.
+The database knows every file there by its exact path and its OneDrive
+identity.
+- **Never move, rename or delete anything in it,** in Finder, on the OneDrive
+  website or in any app. A moved file breaks its Telegram and dashboard links,
+  and the mirror can no longer copy it.
+- **Work from your copies** in `Downloaded from Canvas/`, inside your own
+  module folders. They are yours: edit, move or delete them freely.
+- **To put a file somewhere else, copy it:** hold **Option** while dragging in
+  Finder. A plain drag within OneDrive *moves* it out of the archive.
+- **Unzip a copy, never the original** in the archive.
+- **The "Shared" label** that Finder and the OneDrive website show on the
+  archive is how OneDrive marks the app's own folder. **Manage access** is the
+  real list: it should show only you, as Owner, and no links. If it ever shows
+  anyone else or a link, remove it there.
+
+**If a file was moved out, renamed or deleted:**
+1. **Find where it belongs:**
+   `Apps/Canvas Archive/<term>/<module>/<folder>/<exact original name>`. The
+   name of a file in a Telegram message is that last part. A moved file's
+   OneDrive link says "this item might not exist".
+2. **Deleted:** restore it from OneDrive's **Recycle bin** on the website.
+   Restoring puts it back with its original identity.
+3. **Moved or renamed:** move it back, under its exact original name. Use
+   Finder, or `mv` in Terminal, both within OneDrive. A move keeps its OneDrive
+   identity.
+4. **Do not upload a fresh copy instead.** That is a new item: the links stay
+   broken, and the archive cannot tell it is the same file.
+5. **Then check:** the next mirror run copies it if it was waiting. The
+   Telegram message's OneDrive link opens it again.
 
 ## The dashboard (Phase 8)
 

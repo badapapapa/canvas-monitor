@@ -2959,3 +2959,86 @@ acting on, not for cross-referencing this repository. Three layers:
 - a decision number back in an alert text;
 - seed-groups filing a new group under the fresh proposal;
 - seed-groups leaving a left group enabled.
+
+---
+
+## D-73 — The archive on the Mac: what went wrong, the checks run, and proposals · 2026-10-01
+
+**What happened (the owner's account).** The mirror deferred every waiting
+file, with "could not read the source … Unknown system error -11". OneDrive's
+Mac app had left `Apps/Canvas Archive` as online-only placeholders (53 MB of
+197 MB on disk).
+- **Pinning wasn't enough:** "Always Keep on This Device" downloaded nothing
+  until the owner read the files once from Terminal. The mirror then copied
+  all 8 waiting files, and nothing is deferred now.
+- **Two archived files had left the archive:** a module's lab PDF and its
+  week-7 scaffolding zip. They were dragged in Finder into the owner's own
+  folder, which **moves** them, and the zip was later deleted, likely when it
+  was unzipped. The OneDrive link in the lab file's Telegram message then said
+  the item did not exist.
+- **The owner restored them:** the zip from the Recycle bin, then both moved
+  back with `mv`. Nothing in the system deleted anything.
+
+**Checked now, read-only:**
+- **Every archived file is in place.** All 90 files the database records as
+  archived were looked up at their recorded paths: all present, each with its
+  original OneDrive item id and size. The two the owner moved back are among
+  them. Nothing else is missing.
+  - The lookups were GET by path through the unchanged `RequestGuard`, with
+    `$select=id,size`, so Graph returned no download link.
+  - Nothing was written: the rotated refresh token was discarded. Microsoft
+    does not revoke the old one on use, so the stored token keeps working.
+- **Error -11 is `EDEADLK`.** macOS's `open(2)` documents it for a "dataless"
+  item that needs downloading ("materialization") when the process's I/O policy
+  disallows that. `setiopolicy_np(3)`: the system default policy is **off**, and
+  new processes inherit their parent's. The owner's Terminal could trigger the
+  download; the mirror's launchd job could not.
+- **The "Shared" label:**
+  - The archive root is OneDrive's special app folder (`specialFolder:
+    appRoot`), and Graph reports a `shared` facet on it (scope `users`, an
+    owner). That facet is what Finder and the website's Sharing column show as
+    "Shared".
+  - Manage access, the authoritative list, shows only the owner and no links.
+  - This system never creates a sharing link (D-02). Permissions were not
+    queried: the guard refuses that endpoint, and it stays refused.
+
+**README:** a new "Hands off the archive" section (never move, rename or
+delete; copy with Option-drag; unzip a copy; how to recover a moved or deleted
+file), and a mirror step to keep the archive pinned on the Mac.
+
+**Proposed, not built (awaiting the owner):**
+1. **Archive integrity.**
+   - **What:** each sync re-checks a rotating batch of archived files, the
+     least recently checked first, plus any already missing. Each is a GET by
+     path with `$select=id,size`, within the guard as it is.
+   - **Statuses:** present; missing; a different item at the path; size
+     changed.
+   - **The alert:** one `archive_integrity` alert names up to ten files
+     (module, folder, name) and points to the README's recovery steps. It
+     reminds daily, and resolves when all are back.
+   - **What it never does:** move, re-upload or re-archive anything.
+   - **Storage:** results go in a new table, so this needs a migration, which
+     is the owner's to run.
+   - **Public logs:** only counts and file ids.
+2. **Mirror stalls.**
+   - **What:** the mirror records when each file was first deferred, in its own
+     state file. When any file has waited over 24 hours, it raises a **macOS
+     notification** (`osascript`): how many, and why ("not on this Mac yet",
+     "online-only; macOS refused the download", "still syncing"). It repeats at
+     most daily, and says when it has cleared.
+   - **No new credential, no wider access:** the Mac keeps read-only database
+     access and no Telegram token.
+   - **It cannot reach the phone.** That would need a credential: the least
+     powerful would be a ping-only check URL. The owner's choice, not proposed
+     by default.
+3. **Error -11.**
+   - **Primary: keep the pin.** New files in a pinned folder are downloaded by
+     OneDrive itself, so the mirror never meets a placeholder. Proposal 2
+     would show it if that ever stops being true.
+   - **Fallback, only if needed:** a tiny native launcher that turns
+     materialization on for the mirror's process before running it. It is
+     data-safe: a download only fills the local copy, and nothing changes in
+     the cloud. But it adds a compiled binary, and macOS may then treat the
+     launcher, not the mirror's own node, as the program asking for OneDrive
+     access, which could break the Files and Folders grant (D-59). Tested
+     before adopting, if ever.
