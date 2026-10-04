@@ -42,6 +42,7 @@ import { enqueueContent, enqueueNotice, enqueueOps, enqueueWatching, flush, type
 import { formatSgt, humanSize, type ContentPayload, type Payload, type RenderItem, type WatchingPayload } from '../notify/render.ts';
 import { TelegramClient } from '../notify/telegram.ts';
 import { acquireLock, releaseLock } from './lock.ts';
+import { checkArchiveIntegrity, integrityAlert, type IntegrityOutcome } from '../archive/integrity.ts';
 import { runArchive, tallyFailures, type ArchiveOutcome } from '../archive/stage.ts';
 import { runFollowups, type FollowupOutcome } from '../followups/stage.ts';
 import { publishReadModel } from '../readmodel/publish.ts';
@@ -114,6 +115,8 @@ export interface SyncOutcome {
   followups: FollowupOutcome | null;
   /** The dashboard's read model this run: null when not configured. */
   readModel: 'published' | 'failed' | null;
+  /** Archive integrity this run (D-74); null when it did not run. */
+  integrity: IntegrityOutcome | null;
 }
 
 export async function runSync(ctx: RunContext, options: SyncOptions = {}): Promise<SyncOutcome> {
@@ -311,7 +314,7 @@ function archiveAlerts(a: ArchiveOutcome): AlertCondition[] {
 }
 
 function empty(status: SyncOutcome['status']): SyncOutcome {
-  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null, followups: null, readModel: null };
+  return { status, contexts: 0, failedContexts: 0, baselined: 0, notified: 0, alerts: null, flush: null, planned: [], archive: null, followups: null, readModel: null, integrity: null };
 }
 
 function buildTelegram(config: Config, ctx: RunContext, options: SyncOptions): TelegramClient | null {
@@ -479,6 +482,21 @@ async function syncBody(
       if (a.archived.length + a.adopted + a.failed > 0) evaluatedPrefixes.push('archive_all_failed');
       // Storage is judged only when this run actually reached the drive.
       if (outcome.archive.quota !== null || outcome.archive.stopped === 'quota_full') evaluatedPrefixes.push('storage@');
+
+      // Archive integrity (D-74): only when the drive is usable this run, and only
+      // judged (so only resolved) when the check itself completed.
+      const unusable: ReadonlyArray<string | null> = ['graph_auth', 'graph_app', 'provisioning', 'not_personal', 'unreachable'];
+      if (drive !== null && !unusable.includes(a.stopped)) {
+        try {
+          outcome.integrity = await checkArchiveIntegrity(ctx, drive, now);
+          const integrity = await integrityAlert(ctx);
+          if (integrity !== null) alerts.push(integrity);
+          evaluatedPrefixes.push('archive_integrity');
+        } catch (error) {
+          // A Graph hiccup here says nothing about the files: judge again next run.
+          ctx.log.warn('archive.integrity_failed', { error: error instanceof Error ? error.name : 'error' });
+        }
+      }
     }
     const archived = outcome.archive.archived;
     if (archived.length >= BACKFILL_NOTICE_THRESHOLD) {

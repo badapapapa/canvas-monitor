@@ -767,3 +767,72 @@ describe('Phase 8: the sync publishes the dashboard read model (D-65)', () => {
     assert.equal(ops(h).filter((t) => t.includes("dashboard's read model could not be updated")).length, 1);
   });
 });
+
+describe('archive integrity: a file moved out of the archive is noticed, and its return too (D-74)', () => {
+  let h: H;
+  beforeEach(async () => {
+    h = await harness();
+    h.files.push({ id: 1, name: 'Lecture 06.pdf', size: 20_000, folder: 7 }, { id: 2, name: 'Lab 04.pdf', size: 9_000, folder: 8 });
+    await h.sync(); // baseline + archive
+    h.sent.length = 0;
+  });
+  const LAB = () => `${h.ROOT}/2610/AB1234/Labs/Lab 04.pdf`;
+
+  it('every archived file present: checked, no alert', async () => {
+    await h.sync();
+    const rows = await h.client.execute('SELECT status FROM archive_checks ORDER BY file_id');
+    assert.deepEqual(rows.rows.map((r) => r['status']), ['present', 'present']);
+    assert.equal(ops(h).length, 0);
+    const checks = graphCalls(h).filter((r) => r.path.includes('select=id%2Csize') || r.path.includes('select=id,size'));
+    assert.ok(checks.length >= 2 && checks.every((r) => r.method === 'GET' && r.path.includes('/special/approot:/')), 'GET by path, $select only');
+  });
+
+  it('a file moved out: one alert naming module, folder and file in the ops chat; never the file name in the logs', async () => {
+    const moved = h.graph.detach(LAB())!;
+    h.logLines.length = 0;
+    await h.sync();
+    const alert = ops(h).join('\n');
+    assert.match(alert, /1 archived file is no longer where the archive put it\./);
+    assert.match(alert, /AB1234 Labs: Lab 04\.pdf: missing \(moved, renamed or deleted\)/);
+    assert.match(alert, /Never upload a fresh copy/);
+    assert.doesNotMatch(alert, /D-\d/);
+    assert.ok(!h.logLines.join('\n').includes('Lab 04'), 'a file name reached the public logs');
+    assert.ok(h.logLines.some((l) => l.includes('archive.integrity')), 'counts are logged');
+    assert.deepEqual(h.graph.filesUnder(h.ROOT), ['2610/AB1234/Lectures/Lecture 06.pdf 20000'], 'nothing re-uploaded');
+
+    await h.sync();
+    assert.equal(ops(h).length, 1, 'not every run');
+
+    h.graph.attach(moved, LAB()); // moved back: same item
+    await h.sync();
+    assert.match(ops(h).at(-1) ?? '', /Resolved.*1 archived file is no longer where/);
+    const row = await h.client.execute("SELECT a.status FROM archive_checks a JOIN files f ON f.id = a.file_id WHERE f.target_path LIKE '%Lab 04.pdf'");
+    assert.equal(row.rows[0]?.['status'], 'present');
+  });
+
+  it('a fresh upload at the same path is not the original: "a different file now sits there"', async () => {
+    h.graph.detach(LAB());
+    h.graph.plant(LAB(), Buffer.alloc(9_000, 1));
+    await h.sync();
+    assert.match(ops(h).join('\n'), /Lab 04\.pdf: a different file now sits there/);
+  });
+
+  it('checks a rotating batch, already-wrong files first', async () => {
+    const { checkArchiveIntegrity } = await import('../../src/archive/integrity.ts');
+    h.graph.detach(LAB());
+    const seen: string[] = [];
+    const drive = { itemFacts: async (segs: readonly string[]) => { seen.push(segs.join('/')); return null; } };
+    h.clock.set('2026-09-18T13:00:00Z');
+    await checkArchiveIntegrity(h.ctx(), drive, h.clock.now(), 1); // finds the first file "missing"
+    h.clock.set('2026-09-18T14:00:00Z'); // the other file is now the least recently checked
+    await checkArchiveIntegrity(h.ctx(), drive, h.clock.now(), 1);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1], seen[0], 'a file found wrong is re-checked first, every run');
+  });
+
+  it('a dry run makes no integrity request', async () => {
+    const before = graphCalls(h).length;
+    await h.sync(true);
+    assert.equal(graphCalls(h).length, before);
+  });
+});

@@ -3042,3 +3042,108 @@ file), and a mirror step to keep the archive pinned on the Mac.
      launcher, not the mirror's own node, as the program asking for OneDrive
      access, which could break the Files and Folders grant (D-59). Tested
      before adopting, if ever.
+
+---
+
+## D-74 — Archive integrity and mirror-stall notices (approved, built); syncing reliability (measured, proposed) · 2026-10-04
+
+**The owner's decisions on D-73:** the integrity check as proposed, with file
+names in the ops alert only; mirror stalls as a Mac notification only, with
+no ping URL or other credential on the Mac; and the pin kept as the fix for
+error -11, with the launcher held back unless a stall notice says
+"online-only".
+
+**OneDrive after the discarded refresh token (D-73), checked read-only:**
+normal.
+- Every sync since has exchanged and saved a new token, the last at
+  2026-10-04 05:36 UTC.
+- `archive_drive_ok_at` is current, there are no OneDrive or archive alerts,
+  and nothing is pending or failed.
+- Since 2026-10-01: 147 syncs, 145 `ok` and 2 `partial`.
+
+**Archive integrity, as built:**
+- **What runs:** each sync, when the drive is usable, re-checks up to 25
+  archived files: those already found wrong first, then never-checked ones,
+  then the least recently checked. Each is a GET by path with
+  `$select=id,size`, through the guard as it was. Not widened.
+- **Statuses:** present; missing; a different item at the path; size
+  changed. Results go in `archive_checks`, which is migration 0011.
+- **The alert:** one ops alert, `archive_integrity`, names up to ten files
+  (module, folder, name), reminds daily, and resolves when they are back. It is
+  judged only when the check completed, so a Graph hiccup never claims
+  "Resolved".
+- **The public logs** carry counts only (`archive.integrity`). Nothing is
+  moved, re-uploaded or re-archived.
+- **Migration first:** migration 0011 must be applied before the push, because
+  a sync refuses to run against a schema behind the code.
+
+**Mirror stalls, as built:**
+- **State:** `var/mirror/stall.json` keeps when each waiting file was first
+  deferred, and forgets files that copy.
+- **The notice:** after 24 hours, a macOS notification gives how many files
+  are waiting and why: not on this Mac yet; online-only, with macOS refusing
+  the download; unreadable; still syncing. It repeats at most daily, and one
+  more says when it clears.
+- **How it is shown:** `/usr/bin/osascript` with arguments only, never a shell,
+  and the text escaped for AppleScript. Real runs only.
+- **No new access:** the Mac gains no credential and no access.
+
+**Tests and mutations:**
+- **Integrity tests:** a moved-out file is named in the ops chat and absent
+  from the logs, and resolves when moved back with the same item. A fresh
+  upload is a "different file". Wrong files are re-checked first. Requests are
+  GET by path with `$select`. A dry run makes no request.
+- **Stall tests:** the 24-hour threshold, daily reminders, the cleared
+  notice, a restart afresh, reason classification, and AppleScript escaping.
+- **Mutation-check, 10 new entries (108 in total), all caught.** The
+  mutation check first found a gap in my own rotating-batch test; the test
+  was fixed.
+
+**Syncing reliability: measured over 14 days** (Actions run history plus the
+`runs` table):
+- **20 Sep – 2 Oct:** every one of 54 slots a day produced a run, 702 of
+  702. The start delay was a median of 5–10 minutes, a maximum of 20, creeping
+  up from about 5–7 to about 10 minutes since 29 Sep. The daytime "15 to 35
+  minutes apart" is that jitter, not drops.
+- **From Sat 3 Oct 19:04 SGT:** GitHub's scheduler degraded. Four gaps (all
+  times SGT):
+
+  | From | To | Length |
+  |---|---|---|
+  | Sat 19:04 | Sat 22:38 | 3.6 h |
+  | Sat 22:38 | Sun 02:37 | 4.0 h |
+  | Sun 02:53 | Sun 10:27 | 7.6 h |
+  | Sun 11:02 | Sun 13:19 | 2.3 h |
+
+  Some events were delivered **hours** late rather than dropped: the 02:37
+  run was the 22:40 slot, 4 h late, and the 10:27 run was the 07:00 slot,
+  3.5 h late. The cron that fired is recorded per run.
+- No run was ever queued, cancelled or failed. A manual dispatch ran at once
+  during the episode.
+- GitHub documents that the schedule event "can be delayed during periods of
+  high loads", that high load "include[s] the start of every hour", and that
+  queued jobs "may be dropped".
+
+**Proposed, not built (awaiting the owner):**
+- **Now, adding no access:**
+  - Move every cron minute off :00/:20/:40 and the quarter-hours.
+  - Run daytime every 10 minutes (6 slots an hour) and nights every 30 minutes
+    (2 an hour).
+  - The shared database lock already prevents overlap.
+  - The code's cron list and the workflow stay equal, by the existing test.
+  - This helps with sporadic drops and lateness. It would only have softened
+    the 3–4 Oct episode.
+- **Only if long outages recur:**
+  - Either a relay, where the workflow dispatches its own next run with the
+    run's built-in `GITHUB_TOKEN` (`actions: write`, job-scoped and
+    short-lived; no new credential, but more moving parts);
+  - or an external scheduler calling `workflow_dispatch` with a fine-grained
+    token limited to this repository and Actions read/write, expiring. That
+    is a new credential and account.
+- **Not recommended:** a Mac fallback. It would give an unattended laptop job
+  production write access and every service token, and would not help while
+  the Mac sleeps, which covered most of the 3–4 Oct gaps.
+- **Alert truth:**
+  - Healthchecks keeps meaning "a sync of any kind succeeded recently".
+  - The gap alert keeps counting GitHub's missed scheduled slots, and should
+    also say whether any other sync covered the gap.

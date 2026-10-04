@@ -291,6 +291,12 @@ overwrites; writes nowhere else.
    Otherwise OneDrive leaves files online-only, and macOS refuses to download
    them for a background job. The mirror then defers them with "Unknown system
    error -11" (D-73).
+9. **Stalls tell you.** If a file has waited more than 24 hours to be copied,
+   the mirror shows a macOS notification saying how many and why, at most
+   once a day, and another when it clears (D-74). It is on this Mac only:
+   nothing reaches your phone, and the Mac holds no extra credential for it.
+   The first notice may ask to allow notifications from Script Editor; allow
+   it.
 
 ### Hands off the archive
 
@@ -309,6 +315,11 @@ identity.
   archive is how OneDrive marks the app's own folder. **Manage access** is the
   real list: it should show only you, as Owner, and no links. If it ever shows
   anyone else or a link, remove it there.
+
+**The archive checks itself.** Each sync re-checks a batch of archived files,
+the whole archive every couple of hours. If one is missing, renamed, replaced
+or changed in size, the ops chat names it, reminds you daily, and says
+"Resolved" once it is back (D-74). Nothing is ever re-uploaded for you.
 
 **If a file was moved out, renamed or deleted:**
 1. **Find where it belongs:**

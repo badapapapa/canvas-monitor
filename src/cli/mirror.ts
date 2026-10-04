@@ -14,10 +14,12 @@ import { startRun } from '../core/run-context.ts';
 import { AppError } from '../core/errors.ts';
 import { MirrorGuard, type MirrorRoots } from '../mirror/guard.ts';
 import { loadState, runMirror, saveStateFile, type ArchiveFile, type MirrorReport } from '../mirror/mirror.ts';
+import { evaluateStall, loadStall, notifyMac, saveStall } from '../mirror/stall.ts';
 
 const STATE_FILE = path.join('var', 'mirror', 'state.json');
 const LOG_FILE = path.join('var', 'mirror', 'mirror.log');
 const TMP_DIR = path.join('var', 'mirror', 'tmp');
+const STALL_FILE = path.join('var', 'mirror', 'stall.json');
 
 const expand = (p: string): string => (p.startsWith('~/') ? path.join(homedir(), p.slice(2)) : p);
 
@@ -74,6 +76,15 @@ export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; c
   if (!opts.dryRun) {
     mkdirSync(path.dirname(LOG_FILE), { recursive: true });
     appendFileSync(LOG_FILE, `${JSON.stringify({ at: ctx.clock.now().toISOString(), ...report })}\n`);
+  }
+  // Stalls (D-74): a Mac notification after 24 hours waiting, and when it clears. Real runs only.
+  if (!opts.dryRun && report.mode === 'run') {
+    const { next, notice } = evaluateStall(loadStall(STALL_FILE), report, ctx.clock.now());
+    if (notice !== null) {
+      const shown = notifyMac(notice);
+      appendFileSync(LOG_FILE, `${JSON.stringify({ at: ctx.clock.now().toISOString(), stall_notice: notice.title, shown })}\n`);
+    }
+    saveStall(STALL_FILE, next);
   }
   return 0;
 }

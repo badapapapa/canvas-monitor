@@ -180,6 +180,22 @@ export class GraphDrive {
   }
 
   /**
+   * An item's id and size at a path under the root, or null if nothing is
+   * there (archive integrity, DECISIONS.md D-74). A GET by path with
+   * `$select=id,size`: the shape the guard already allows, and Graph then
+   * returns no download URL at all.
+   */
+  async itemFacts(segments: readonly string[]): Promise<{ id: string; size: number } | null> {
+    try {
+      const item = await this.request<{ id?: unknown; size?: unknown }>('GET', rootedPath(this.o.root, segments), undefined, `?${encodeURIComponent('$select')}=id,size`);
+      return { id: String(item.id ?? ''), size: Number(item.size ?? -1) };
+    } catch (error) {
+      if (error instanceof GraphError && error.code === 'not_found') return null;
+      throw error;
+    }
+  }
+
+  /**
    * Quota straight from the drive -- never hard-coded. Under the AppFolder
    * scope Microsoft does not list GET /me/drive as permitted; a refusal is
    * reported as 'unreadable' rather than as a failure.

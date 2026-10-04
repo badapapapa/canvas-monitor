@@ -196,6 +196,25 @@ export class FakeGraph {
     node(parts[parts.length - 1] ?? 'x', 'file', cur, bytes);
   }
 
+  /** Take an item out of the drive, as a Finder drag or a delete would; it keeps its id. */
+  detach(absolute: string): FNode | null {
+    const n = this.resolveAbsolute(absolute);
+    if (n === null || n.parent === null) return null;
+    n.parent.children.delete(n.name.toLowerCase());
+    n.parent = null;
+    return n;
+  }
+
+  /** Put an item back (same id), as a Recycle-bin restore or a move back would. */
+  attach(n: FNode, absolute: string): void {
+    const parts = absolute.split('/').filter(Boolean);
+    let cur = this.driveRoot;
+    for (const p of parts.slice(0, -1)) cur = cur.children.get(p.toLowerCase()) ?? node(p, 'folder', cur);
+    n.name = parts[parts.length - 1] ?? n.name;
+    n.parent = cur;
+    cur.children.set(n.name.toLowerCase(), n);
+  }
+
   // --- routing ----------------------------------------------------------------
 
   private resolveAbsolute(absolute: string): FNode | null {
