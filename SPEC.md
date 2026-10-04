@@ -677,6 +677,10 @@ Caveats to handle explicitly:
   adaptive cadence. Use two schedule entries: every 20 minutes for
   `00:00–15:00 UTC` (08:00–23:00 SGT) and hourly for the rest. Make the cadence
   configurable.
+
+  > **As built (DECISIONS.md D-75):** every 10 minutes by day and every 30 at
+  > night, on minutes away from the top of the hour and the quarter-hours, where
+  > GitHub's scheduler is busiest. 108 runs a day.
 - **Cache `node_modules`** and shallow-checkout, to keep job time down.
 - **Actions schedules on a best-effort basis** and routinely delays or drops
   cron runs. Every run therefore records `scheduled_for` (passed in by the

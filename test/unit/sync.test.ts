@@ -733,17 +733,18 @@ describe('sync end to end', () => {
     // minutes on, which made a 24-hour gap read as a blip.
     await sync(h);
     h.sent.length = 0;
-    await priorRun(h, '2026-09-13T04:00:00.000Z');
+    // On today's slots (D-75): the 04:07Z run, then none until the 04:27Z one a day later.
+    await priorRun(h, '2026-09-13T04:07:00.000Z');
 
     h.clock.set('2026-09-14T04:37:31Z');
-    await sync(h, { scheduledFor: new Date('2026-09-14T04:20:00Z') });
+    await sync(h, { scheduledFor: new Date('2026-09-14T04:27:00Z') });
     assert.equal(ops(h).length, 1);
     assert.match(ops(h)[0]?.text ?? '', /stopped for 24\.3 h and have now resumed/);
-    assert.match(ops(h)[0]?.text ?? '', /54 scheduled runs never happened/);
+    assert.match(ops(h)[0]?.text ?? '', /109 scheduled runs never happened/); // a full day's 108, plus 04:17Z
 
-    await priorRun(h, '2026-09-14T04:20:00.000Z');
+    await priorRun(h, '2026-09-14T04:27:00.000Z');
     h.clock.set('2026-09-14T04:47:00Z');
-    await sync(h, { scheduledFor: new Date('2026-09-14T04:40:00Z') });
+    await sync(h, { scheduledFor: new Date('2026-09-14T04:37:00Z') });
     assert.equal(ops(h).length, 1, 'no follow-up "Resolved" for an event');
     assert.equal(content(h).length, 0);
   });
@@ -751,9 +752,9 @@ describe('sync end to end', () => {
   it('says nothing about an on-time run or a single missed slot', async () => {
     await sync(h);
     h.sent.length = 0;
-    await priorRun(h, '2026-09-17T04:00:00.000Z');
-    h.clock.set('2026-09-17T04:47:00Z');
-    await sync(h, { scheduledFor: new Date('2026-09-17T04:40:00Z') }); // skipped 04:20 only
+    await priorRun(h, '2026-09-17T04:07:00.000Z');
+    h.clock.set('2026-09-17T04:37:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-17T04:27:00Z') }); // skipped 04:17 only
     assert.equal(ops(h).length, 0);
   });
 

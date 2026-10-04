@@ -26,23 +26,29 @@ describe('sync schedule', () => {
     assert.ok(minutes > 0 && minutes < 15, `timeout-minutes is ${minutes}`);
   });
 
-  it('counts nothing between consecutive daytime slots', () => {
-    assert.equal(slotsBetween(new Date('2026-09-17T04:00:00Z'), new Date('2026-09-17T04:20:00Z')), 0);
+  it('counts nothing between consecutive slots, by day, by night and across the switch', () => {
+    assert.equal(slotsBetween(new Date('2026-09-17T04:07:00Z'), new Date('2026-09-17T04:17:00Z')), 0);
+    assert.equal(slotsBetween(new Date('2026-09-17T16:13:00Z'), new Date('2026-09-17T16:43:00Z')), 0);
+    assert.equal(slotsBetween(new Date('2026-09-17T14:57:00Z'), new Date('2026-09-17T15:13:00Z')), 0, 'day to night');
+    assert.equal(slotsBetween(new Date('2026-09-17T23:43:00Z'), new Date('2026-09-18T00:07:00Z')), 0, 'night to day');
   });
 
-  it('counts the slots a gap skipped, across both cadences', () => {
-    // The real outage: last run for 04:00Z on the 13th, next for 04:20Z on the
-    // 14th. 54 slots in between: 1 stuck run, 51 cancelled behind it, and 2
-    // that GitHub never created at all.
-    assert.equal(slotsBetween(new Date('2026-09-13T04:00:00Z'), new Date('2026-09-14T04:20:00Z')), 54);
+  it('has 108 slots a day: every 10 minutes for 15 hours, every 30 for 9 (D-75)', () => {
+    assert.equal(slotsBetween(new Date('2026-09-13T04:07:00Z'), new Date('2026-09-14T04:17:00Z')), 108);
   });
 
-  it('counts overnight gaps in hourly slots', () => {
-    // 16:00Z to 20:00Z skips 17:00, 18:00 and 19:00.
-    assert.equal(slotsBetween(new Date('2026-09-17T16:00:00Z'), new Date('2026-09-17T20:00:00Z')), 3);
+  it('counts overnight gaps in half-hour slots', () => {
+    // 16:13Z to 20:13Z skips 16:43, 17:13, 17:43, 18:13, 18:43, 19:13 and 19:43.
+    assert.equal(slotsBetween(new Date('2026-09-17T16:13:00Z'), new Date('2026-09-17T20:13:00Z')), 7);
   });
 
-  it('reports from one hour of missed daytime runs', () => {
+  it("keeps every slot off GitHub's busiest minutes: :00, :15, :20, :30, :40, :45 (D-75)", () => {
+    const busy = new Set([0, 15, 20, 30, 40, 45]);
+    const minutes = SYNC_SCHEDULES.flatMap((c) => c.split(' ')[0]!.split(',').map(Number));
+    assert.ok(minutes.every((m) => Number.isInteger(m) && !busy.has(m)), `slot minutes ${minutes.join(',')}`);
+  });
+
+  it('reports from three missed slots: 30 minutes by day, 90 at night', () => {
     assert.equal(MISSED_SLOTS_REPORT_THRESHOLD, 3);
   });
 });

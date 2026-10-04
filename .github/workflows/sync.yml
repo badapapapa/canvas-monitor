@@ -1,9 +1,12 @@
 # Canvas sync. SPEC.md section 11; DECISIONS.md D-07, D-10, D-43.
 #
-# Adaptive cadence, expressed in UTC because Actions cron is UTC-only:
-#   every 20 min 08:00-22:40 SGT  ->  00:00-14:40 UTC
-#   hourly       23:00-07:00 SGT  ->  15:00-23:00 UTC
-# 54 runs/day. Unlimited minutes because this repository is public (D-10).
+# Adaptive cadence, expressed in UTC because Actions cron is UTC-only (D-75):
+#   every 10 min 08:07-22:57 SGT  ->  :07 :17 :27 :37 :47 :57, 00-14 UTC
+#   every 30 min 23:13-07:43 SGT  ->  :13 :43, 15-23 UTC
+# 108 runs/day. Off the top of the hour and off :00/:15/:20/:30/:40/:45, where
+# GitHub's scheduler is busiest and most likely to delay or drop an event. A
+# dropped slot now costs 10 minutes by day. The database lock prevents overlap.
+# Unlimited minutes because this repository is public (D-10).
 #
 # Everything this job prints is public. Logs are redacted by default and
 # --unsafe-log is refused under CI; never add LOG_LEVEL=debug here.
@@ -12,8 +15,8 @@ name: sync
 
 on:
   schedule:
-    - cron: '*/20 0-14 * * *'
-    - cron: '0 15-23 * * *'
+    - cron: '7,17,27,37,47,57 0-14 * * *'
+    - cron: '13,43 15-23 * * *'
   workflow_dispatch: {}
 
 # Deliberately NO `concurrency:` group (DECISIONS.md D-46).

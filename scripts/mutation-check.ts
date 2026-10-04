@@ -167,6 +167,13 @@ const MUTATIONS: Mutation[] = [
     tests: ['test/unit/mirror-stall.test.ts'],
   },
   {
+    name: "the gap alert's cron list out of step with the workflow (D-75)",
+    file: 'src/sync/schedule.ts',
+    from: "export const SYNC_SCHEDULES = ['7,17,27,37,47,57 0-14 * * *', '13,43 15-23 * * *'] as const;",
+    to: "export const SYNC_SCHEDULES = ['*/20 0-14 * * *', '0 15-23 * * *'] as const;",
+    tests: ['test/unit/schedule.test.ts'],
+  },
+  {
     name: 'ignore quiet hours',
     file: 'src/notify/queue.ts',
     from: 'if (urgent || !isQuietHours(now)) return null;',

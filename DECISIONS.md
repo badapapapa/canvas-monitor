@@ -3147,3 +3147,52 @@ normal.
   - Healthchecks keeps meaning "a sync of any kind succeeded recently".
   - The gap alert keeps counting GitHub's missed scheduled slots, and should
     also say whether any other sync covered the gap.
+
+---
+
+## D-75 — Syncs every 10 minutes by day, 30 at night, off the busy minutes; the two partial runs · 2026-10-04
+
+**The owner's decisions on D-74's options:** A and B. Move the cron minutes
+off :00/:20/:40, and run every 10 minutes by day and every 30 at night. Keep
+the gap alert's cron list in step with the workflow. Leave Healthchecks as it
+is (1-hour period, 30-minute grace). Hold D, the self-relay, in reserve in
+case long outages recur. No C (Mac fallback), no E (external scheduler).
+
+**As built:**
+- **The crons, in UTC:** `7,17,27,37,47,57 0-14 * * *` (08:07–22:57 SGT,
+  every 10 minutes) and `13,43 15-23 * * *` (23:13–07:43 SGT, every 30
+  minutes). That is 108 runs a day, up from 54.
+- **No slot falls on :00, :15, :20, :30, :40 or :45.** GitHub documents the
+  start of every hour as its busiest time; the quarter-hours are the usual
+  next choices for everyone else's crons.
+- **The code's cron list** (`src/sync/schedule.ts`) changed with the workflow.
+  The existing test that the two match still holds, and a mutation entry now
+  proves it catches drift.
+- **New tests:** 108 slots a day; no gap counted across the day/night switch;
+  overnight gaps counted in half-hour slots; and no slot on a busy minute.
+- **The gap report still fires from three missed slots in a row.** That is
+  now 30 minutes by day and 90 at night, down from 60 and 180. A single late
+  or lost slot never reports.
+- **Unchanged:**
+  - **Healthchecks** keeps the owner's settings. It is pinged by every sync,
+    so it means "a sync succeeded recently".
+  - **The lock:** the database lock (`sync_lock`, 15-minute staleness) and the
+    10-minute job timeout prevent overlap at the new cadence.
+  - **What one run does:** quiet hours, alerts and archiving.
+- **Cost:** twice the runs, Canvas requests and database rows. Actions
+  minutes are free for a public repository.
+
+**The two `partial` syncs since 2026-10-01, checked read-only:** 2026-10-03
+02:14 and 14:44 SGT, Actions runs 37046055773 and 37104009015.
+- **Cause, in both:** one context, the course behind a module, failed with
+  `fetch failed`. That is Node's error for a network-level failure (a dropped
+  connection, DNS, a reset) while talking to Canvas. The other four contexts
+  synced normally.
+- **What a failed context costs:** it is one transaction per context, so it
+  writes nothing that run, and its watermarks do not advance.
+- **Nothing was left undone:**
+  - the next run was `ok` both times (03:11 and 15:10 SGT);
+  - nothing new for that course appeared just after;
+  - all its resources are current;
+  - no alert was raised, correctly, since a 24-hour staleness alert is the
+    threshold.
