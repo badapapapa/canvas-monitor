@@ -140,6 +140,8 @@ export async function runArchive(deps: {
   contextIds?: number[];
   unlimited?: boolean;
   fetchImpl?: typeof fetch;
+  /** The sync's remaining run budget (D-77): the cap is the smaller of this and ARCHIVE_TIME_BUDGET_MS. */
+  maxMs?: number;
 }): Promise<ArchiveOutcome> {
   const { ctx, config } = deps;
   const log = ctx.log.child({ stage: 'archive' });
@@ -151,7 +153,7 @@ export async function runArchive(deps: {
   // Time is the cap that binds in practice (D-55): ~7 s per file, serially,
   // so about 30-35 files per run. It leaves the 10-minute job timeout room for
   // detection before and the flush after.
-  const maxMs = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : ARCHIVE_TIME_BUDGET_MS;
+  const maxMs = deps.unlimited === true ? Number.MAX_SAFE_INTEGER : Math.min(ARCHIVE_TIME_BUDGET_MS, deps.maxMs ?? ARCHIVE_TIME_BUDGET_MS);
   const out: ArchiveOutcome = { archived: [], adopted: 0, skipped: 0, failed: 0, planned: 0, stopped: null, stopDetail: null, quota: null, exhausted: 0, failures: [] };
 
   // Check the drive before touching any file: this is where a dead refresh

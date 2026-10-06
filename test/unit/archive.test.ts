@@ -830,6 +830,15 @@ describe('archive integrity: a file moved out of the archive is noticed, and its
     assert.equal(seen[1], seen[0], 'a file found wrong is re-checked first, every run');
   });
 
+  it('stops checking at its deadline; the rest wait for the next run (D-77)', async () => {
+    const { checkArchiveIntegrity } = await import('../../src/archive/integrity.ts');
+    let calls = 0;
+    const drive = { itemFacts: async () => { calls += 1; return null; } };
+    const out = await checkArchiveIntegrity(h.ctx(), drive, h.clock.now(), 25, Date.now() - 1);
+    assert.equal(out.checked, 0);
+    assert.equal(calls, 0);
+  });
+
   it('a dry run makes no integrity request', async () => {
     const before = graphCalls(h).length;
     await h.sync(true);

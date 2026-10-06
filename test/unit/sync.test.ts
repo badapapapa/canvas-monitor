@@ -20,7 +20,8 @@ import { setConfig } from '../../src/core/config.ts';
 import { silentLogger } from '../../src/core/log.ts';
 import type { Clock } from '../../src/core/clock.ts';
 import type { RunContext } from '../../src/core/run-context.ts';
-import { runSync } from '../../src/sync/run.ts';
+import { runSync, type SyncOptions } from '../../src/sync/run.ts';
+import { enqueueOps } from '../../src/notify/queue.ts';
 import { sgtToUtc } from '../../src/core/time.ts';
 import { startServer, sendJson, type FakeServer } from '../helpers/fake-canvas.ts';
 
@@ -32,6 +33,8 @@ interface FakeCourse {
   files?: unknown[] | number;
   folders?: unknown[] | number;
   modules?: unknown[] | number;
+  /** Answer this course's requests only after this long: a slow course (D-77). */
+  delayMs?: number;
 }
 
 interface CanvasState {
@@ -39,6 +42,8 @@ interface CanvasState {
   announcements: Array<Record<string, unknown>>;
   courses: Record<number, FakeCourse>;
   groups: Record<number, { files?: unknown[] | number; folders?: unknown[] | number }>;
+  /** Every path asked for, in order (D-77: proves what was NOT requested). */
+  hits?: string[];
 }
 
 interface Sent {
@@ -57,6 +62,7 @@ after(async () => {
 function canvasHandler(state: CanvasState) {
   return (req: IncomingMessage, res: ServerResponse): void => {
     const url = new URL(req.url ?? '/', 'http://x');
+    state.hits?.push(url.pathname);
     if (!state.auth) return sendJson(res, 401, { errors: [{ message: 'Invalid access token.' }] });
     if (url.pathname === '/api/v1/users/self') return sendJson(res, 200, { id: 42 });
     if (url.pathname === '/api/v1/announcements') {
@@ -70,8 +76,10 @@ function canvasHandler(state: CanvasState) {
       const defaults: Record<string, unknown[]> = { files: [], folders: [{ id: 1, full_name: 'course files' }], modules: [] };
       const value = owner === undefined ? undefined : ((owner as Record<string, unknown>)[field] ?? defaults[field]);
       if (value === undefined) return sendJson(res, 404, { errors: [{ message: 'not found' }] });
-      if (typeof value === 'number') return sendJson(res, value, { errors: [{ message: 'failure' }] });
-      return sendJson(res, 200, value);
+      const answer = () => (typeof value === 'number' ? sendJson(res, value, { errors: [{ message: 'failure' }] }) : sendJson(res, 200, value));
+      const delay = (owner as FakeCourse | undefined)?.delayMs;
+      if (delay !== undefined) { setTimeout(() => { if (!res.writableEnded && !res.destroyed) answer(); }, delay); return; }
+      return answer();
     }
     sendJson(res, 404, {});
   };
@@ -174,8 +182,8 @@ async function harness(): Promise<{
 }
 
 type H = Awaited<ReturnType<typeof harness>>;
-const sync = (h: H, options: { dryRun?: boolean; scheduledFor?: Date } = {}) =>
-  runSync(h.ctx(options), { telegramApiBase: h.telegramUrl });
+const sync = (h: H, options: { dryRun?: boolean; scheduledFor?: Date } = {}, syncOptions: Omit<SyncOptions, 'telegramApiBase'> = {}) =>
+  runSync(h.ctx(options), { telegramApiBase: h.telegramUrl, ...syncOptions });
 
 /** Record a completed scheduled run, as startRun would have. */
 async function priorRun(h: H, slot: string): Promise<void> {
@@ -740,11 +748,11 @@ describe('sync end to end', () => {
     await sync(h, { scheduledFor: new Date('2026-09-14T04:27:00Z') });
     assert.equal(ops(h).length, 1);
     assert.match(ops(h)[0]?.text ?? '', /stopped for 24\.3 h and have now resumed/);
-    assert.match(ops(h)[0]?.text ?? '', /109 scheduled runs never happened/); // a full day's 108, plus 04:17Z
+    assert.match(ops(h)[0]?.text ?? '', /63 scheduled slots produced no sync \(GitHub's run history could not be read to say why\)/); // a full day's 63
 
     await priorRun(h, '2026-09-14T04:27:00.000Z');
     h.clock.set('2026-09-14T04:47:00Z');
-    await sync(h, { scheduledFor: new Date('2026-09-14T04:37:00Z') });
+    await sync(h, { scheduledFor: new Date('2026-09-14T04:47:00Z') });
     assert.equal(ops(h).length, 1, 'no follow-up "Resolved" for an event');
     assert.equal(content(h).length, 0);
   });
@@ -753,9 +761,62 @@ describe('sync end to end', () => {
     await sync(h);
     h.sent.length = 0;
     await priorRun(h, '2026-09-17T04:07:00.000Z');
-    h.clock.set('2026-09-17T04:37:00Z');
-    await sync(h, { scheduledFor: new Date('2026-09-17T04:27:00Z') }); // skipped 04:17 only
+    h.clock.set('2026-09-17T04:50:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-17T04:47:00Z') }); // skipped 04:27 only
     assert.equal(ops(h).length, 0);
+  });
+
+  it("says what GitHub did with the runs in a gap: cancelled before starting, or never created (D-77)", async () => {
+    await sync(h);
+    h.sent.length = 0;
+    await priorRun(h, '2026-09-17T01:07:00.000Z'); // last sync before the gap
+    // GitHub created three runs in the gap; one reached our sync earlier (it has a runs row), two never did.
+    await h.client.execute({ sql: "INSERT INTO runs (run_id, command, dry_run, started_at, status, host) VALUES (?, 'sync', 0, '2026-09-17T02:00:00Z', 'ok', 'gha:301')", args: [randomUUID()] });
+    const lookups: Array<[string, string]> = [];
+    const gapRuns = async (from: Date, to: Date) => {
+      lookups.push([from.toISOString(), to.toISOString()]);
+      return [{ id: '301', status: 'completed', conclusion: 'success' }, { id: '302', status: 'completed', conclusion: 'cancelled' }, { id: '303', status: 'completed', conclusion: 'cancelled' }];
+    };
+    h.clock.set('2026-09-17T04:30:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-17T04:27:00Z') }, { gapRuns });
+    const text = ops(h)[0]?.text ?? '';
+    // 01:07 -> 04:27 skips 01:27, 01:47, ... 04:07: 9 slots. Two runs cancelled, seven never created.
+    assert.match(text, /9 scheduled slots produced no sync: GitHub created 2 runs but cancelled them before they started \(no machine was assigned in time\); GitHub never created a run for 7 slots\./);
+    assert.doesNotMatch(text, /never happened/);
+    assert.equal(lookups[0]?.[0], '2026-09-17T01:08:00.000Z', 'asks only about the gap');
+  });
+
+  it('a slow course fails alone, once its time is used; the other course still syncs (D-77)', async () => {
+    await sync(h); // baseline
+    (h.state.courses[10002] as FakeCourse).delayMs = 3_000;
+    (h.state.courses[10001] as FakeCourse).assignments = [assignment(7, '2026-09-25T15:59:00Z')];
+    const started = Date.now();
+    const outcome = await sync(h, {}, { budgets: { courseMs: 300 } });
+    const took = Date.now() - started;
+    assert.equal(outcome.failedContexts, 1, 'only the slow course');
+    assert.equal(outcome.status, 'partial');
+    assert.ok(took < 2_500, `the run waited for the slow course (${took} ms)`);
+    assert.match(content(h).map((m) => m.text).join('\n'), /Assignment 7/, 'the healthy course still notified');
+    const lock = await h.client.execute('SELECT holder FROM sync_lock WHERE id = 1');
+    assert.equal(lock.rows[0]?.['holder'], null, 'the lock was released');
+  });
+
+  it('a run whose time is used up starts no more courses, but still finishes: messages queued, lock released (D-77)', async () => {
+    const db = createDb(h.client, silentLogger(), false);
+    await enqueueOps(db, { sendKey: 'test pending', payload: { kind: 'ops', severity: 'warn', summary: 'A message due now.' }, now: h.clock.now() });
+    h.state.hits = [];
+    const outcome = await sync(h, {}, { budgets: { runMs: 1, reserveMs: 0 } });
+    assert.equal(outcome.failedContexts, outcome.contexts, 'every course left for the next run');
+    assert.deepEqual(h.state.hits.filter((p) => /\/(courses|groups)\/|announcements/.test(p)), [], 'no course was even started');
+    const touched = await h.client.execute('SELECT count(*) AS n FROM watermarks');
+    assert.equal(touched.rows[0]?.['n'], 0, 'a course left for the next run writes nothing, not even a failed fetch');
+    assert.equal(outcome.status, 'partial');
+    assert.equal(ops(h).length, 0, 'nothing sent after the deadline');
+    assert.ok((outcome.flush?.leftQueued ?? 0) >= 1, 'left queued, not lost');
+    const still = await h.client.execute("SELECT state FROM notifications WHERE channel = 'ops' AND payload LIKE '%A message due now.%'");
+    assert.equal(still.rows[0]?.['state'], 'queued');
+    const lock = await h.client.execute('SELECT holder FROM sync_lock WHERE id = 1');
+    assert.equal(lock.rows[0]?.['holder'], null);
   });
 
   it('takes over a lock abandoned for more than 15 minutes', async () => {

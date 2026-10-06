@@ -20,6 +20,7 @@
  */
 
 import type { RunContext } from '../core/run-context.ts';
+import { budgetNow } from '../core/clock.ts';
 import type { AlertCondition } from '../notify/ops.ts';
 import type { GraphDrive } from '../graph/drive.ts';
 
@@ -41,6 +42,8 @@ export async function checkArchiveIntegrity(
   drive: Pick<GraphDrive, 'itemFacts'>,
   now: Date,
   batch: number = INTEGRITY_BATCH,
+  /** Wall-clock ms after which no further file is checked (D-77); the rest wait for the next run. */
+  deadline: number = Number.POSITIVE_INFINITY,
 ): Promise<IntegrityOutcome> {
   const rows = await ctx.db.read({
     sql: `SELECT f.id, f.target_path, f.onedrive_item_id, f.size_bytes, a.status, a.since
@@ -53,7 +56,10 @@ export async function checkArchiveIntegrity(
   });
   const nowIso = now.toISOString();
   let wrong = 0;
+  let checked = 0;
   for (const r of rows.rows) {
+    if (budgetNow() >= deadline) break;
+    checked += 1;
     const facts = await drive.itemFacts(String(r['target_path']).split('/'));
     const status: IntegrityStatus =
       facts === null ? 'missing'
@@ -68,8 +74,8 @@ export async function checkArchiveIntegrity(
       args: [String(r['id']), nowIso, status, since],
     });
   }
-  ctx.log.info('archive.integrity', { checked: rows.rows.length, wrong });
-  return { checked: rows.rows.length, wrong };
+  ctx.log.info('archive.integrity', { checked, wrong });
+  return { checked, wrong };
 }
 
 const WHY: Record<Exclude<IntegrityStatus, 'present'>, string> = {

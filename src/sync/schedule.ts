@@ -9,14 +9,14 @@
 import { parseCron } from '../core/cron.ts';
 
 /**
- * Every 10 min 08:07-22:57 SGT, every 30 min 23:13-07:43 SGT, in UTC (D-75).
+ * Every 20 min 08:07-22:47 SGT, every 30 min 23:13-07:43 SGT, in UTC (D-77).
  * Off :00/:15/:20/:30/:40/:45, where GitHub's scheduler is busiest.
  */
-export const SYNC_SCHEDULES = ['7,17,27,37,47,57 0-14 * * *', '13,43 15-23 * * *'] as const;
+export const SYNC_SCHEDULES = ['7,27,47 0-14 * * *', '13,43 15-23 * * *'] as const;
 
 /**
- * Report a gap once at least this many consecutive slots were missed: 30
- * minutes in the daytime, 90 overnight. A single lost run is 10 minutes of
+ * Report a gap once at least this many consecutive slots were missed: an hour
+ * in the daytime, 90 minutes overnight. A single lost run is 20 minutes of
  * latency that the next run fully recovers; three is a pattern worth knowing.
  */
 export const MISSED_SLOTS_REPORT_THRESHOLD = 3;

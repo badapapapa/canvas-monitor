@@ -3278,3 +3278,150 @@ PDFs. **Nothing in the filenames says how many parts a lab has.**
    - **Not guessed:** the part count is never inferred, because labs vary (1,
      then 2) and a wrong guess would close early and stop the reminders.
    - **Needs** a migration, which is the owner's to run.
+
+---
+
+## D-77 — Daytime back to 20 minutes; the gap report says what happened; fail-fast budgets; the materialize helper; GitHub's terms, assessed · 2026-10-06
+
+**The owner's decisions on D-76:**
+- **No D** (the self-relay).
+- **Daytime back to every 20 minutes,** off the busy minutes; nights stay
+  every 30.
+- **Build:** the truthful gap report, with read access to this repository's
+  Actions runs for the sync job only; the fail-fast budgets; and the
+  materialize helper, with its source and build script committed and the
+  binary not.
+- **Multi-part answers: not built.** The owner dismisses a follow-up by hand
+  when its last part arrives. Recorded here as the decision; nothing changes
+  in code.
+
+**Correction to D-75:** the two `partial` syncs' `fetch failed` was **most
+likely Turso, not Canvas**. The Canvas client never throws on a network
+failure: it returns an error result and retries. Inside a course's sync, only
+the database client throws a raw `fetch failed`. The conclusion stands: one
+transaction per course, nothing half-written, re-read on the next run.
+
+**Schedule, as built:**
+- **The crons:** `7,27,47 0-14 * * *` (08:07–22:47 SGT, every 20 minutes) and
+  `13,43 15-23 * * *` (every 30 minutes at night). That is 63 runs a day.
+- **The code's cron list and tests** changed with the workflow.
+- **The gap report** still needs three missed slots in a row: an hour by
+  day, 90 minutes at night.
+
+**The truthful gap report:**
+- **What it asks:** when it fires, the run asks GitHub for this workflow's
+  **scheduled** runs created inside the gap. It uses the job's own token with
+  `actions: read` on the sync job only, a 5-second timeout, and the
+  repository name validated.
+- **How it classifies them:** a run with no row in `runs` never reached the
+  sync. Such runs are reported as "cancelled before they started (no machine
+  was assigned in time)", "failed before the sync itself started", or "still
+  waiting"; the rest of the slots as "never created".
+- **Without that history,** it says it could not tell, rather than claiming
+  runs "never happened".
+- **What it logs:** counts only. The lookup can never fail the sync.
+- **Access:** the workflow default stays `contents: read`. The sync job alone
+  adds `actions: read`, and no write permission exists anywhere (tested). The
+  token is GitHub's per-run token, which expires with the run, under the name
+  `ACTIONS_READ_TOKEN`.
+
+**Fail-fast, as built:**
+- **Turso:** every request to either database times out after 15 s, through
+  the libsql client's own `fetch` option. Before, there was no timeout at all.
+- **A run budget of 8 minutes,** the job timeout being 10:
+  - **Work deadline:** courses, the archive, the integrity check and
+    follow-ups stop starting new things 90 s before the budget ends.
+  - **Finish deadline:** queued messages stay queued after 20 s before the
+    end.
+  - **Always runs:** the lock release and the Healthchecks ping. They run in
+    `finally`, each with its own timeout.
+- **Per course:** at most 90 s of Canvas requests. Each request's timeout
+  shrinks to fit, and no retry waits past the deadline. A slow course fails
+  alone, and the others sync.
+- **Archive and integrity:** the archive's 240 s cap is also bounded by the
+  remaining work time; the integrity check gets 60 s and resumes next run.
+- **Course status:** a course left unstarted for lack of time is logged and
+  counted as failed, which makes the run `partial`, and it is re-read next run.
+- **Clock discipline:** budgets read real elapsed time through `budgetNow()`
+  in `core/clock.ts`, so the clock-discipline test still holds.
+
+**The materialize helper, as built:**
+- **What it is:** `native/materialize.c`, about 50 lines of C. It switches
+  dataless-file materialization on **for itself**
+  (`setiopolicy_np(IOPOL_TYPE_VFS_MATERIALIZE_DATALESS_FILES,
+  IOPOL_SCOPE_PROCESS, IOPOL_MATERIALIZE_DATALESS_FILES_ON)`).
+- **What it does:** it opens each argument `O_RDONLY|O_NOFOLLOW|O_CLOEXEC`,
+  reads it through, prints no path, and exits 0, 1, 2 or 3. It never writes,
+  renames or deletes.
+- **How it is built:** `scripts/build-materialize.ts` compiles it with
+  Apple's `xcrun clang -Wall -Wextra -Werror` into `var/runtime/bin/` (never
+  committed), signed ad hoc by the linker, and shows the source's and binary's
+  SHA-256.
+- **When the mirror uses it:** only for a read refused with -11. It passes
+  the guard-approved, resolved archive path, and then retries the copy once in
+  the same run. Without the helper, behaviour is unchanged.
+- **The permission test:** `scripts/mirror-schedule.ts --materialize-test
+  <archive path>` loads a one-shot LaunchAgent with the mirror's own node,
+  launchd domain and `Background` process type. It reads one online-only file,
+  runs the helper, reads again, and logs one line naming the asking binary.
+  `--remove-materialize-test` unloads it.
+
+**The mutation check itself had a gap,** found by this work. Node reports a
+test that exceeds its own time limit as "cancelled", not "failed". The checker
+counted only "fail", so a mutation that made a test hang passed as uncaught.
+Cancelled tests now count as failing. Separately, a weak test, "no course is
+started once the budget is used up", passed because those courses also failed
+fast. It now asserts that no Canvas request was made, and that the course wrote
+nothing at all, not even a failed fetch's status.
+
+**Tests:** the Turso timeout against a silent server; the Canvas deadline
+(cut off mid-request, never started after it); budget arithmetic, inside the
+job timeout; gap explanations and the GitHub lookup (token, URL, refusals);
+the workflow's permissions; a slow course failing alone while the other
+notifies; a used-up budget starting no course, leaving messages queued and
+releasing the lock; the integrity deadline; and the mirror's helper path. The
+C helper is compiled and run in the tests: read through, symlink refused, exit
+codes, and a source check.
+
+**GitHub's terms, assessed honestly, for the whole design:**
+- **What runs on GitHub:** a personal service (poll Canvas, archive to
+  OneDrive, notify on Telegram), 63 times a day on GitHub-hosted runners, about
+  a minute each, from a public repository whose software is that service. A
+  monthly workflow also pushes an empty commit after 45 days without commits,
+  to stop GitHub disabling the schedule.
+- **Read strictly, it does not fit the hosted-runner clause.** Running the
+  service is *operating* the project, not its "production, testing,
+  deployment, or publication". And a scheduled job acting as the app's backend
+  is close to the "part of a serverless application" example under the burden
+  clause, though the burden is small.
+- **The keepalive is the part most at odds with the spirit:** it exists to
+  defeat a GitHub control.
+- **In practice:** low-volume scheduled jobs on public repositories are very
+  common, and GitHub's published enforcement targets mining, spam and
+  excessive load. But GitHub "retains full discretion", up to account
+  suspension, and there is no official statement that this use is allowed.
+- **Realistic risk: low, not zero.** The likeliest consequence, if any, is
+  Actions being disabled for the repository. Account suspension for this
+  pattern alone looks unlikely. For an account to be shown to employers, the
+  clean position is GitHub for code and CI only.
+- **Alternatives, proposed, not built:**
+  - **Google Cloud Run Jobs triggered by Cloud Scheduler:**
+    - **Cost:** about $0 within the free tiers (Scheduler's 3 free jobs;
+      Cloud Run's free vCPU-seconds comfortably cover about 63 one-minute
+      runs a day), but it needs a billing account.
+    - **Reliability:** a scheduler that fires on time, without
+      runner-assignment queues.
+    - **Secrets that move:** the four Actions secrets (`TURSO_DATABASE_URL`,
+      `TURSO_AUTH_TOKEN`, `READMODEL_DATABASE_URL`, `READMODEL_WRITE_TOKEN`) go
+      to Google Secret Manager, readable by one service account. The Canvas,
+      OneDrive and Telegram tokens stay in the database's `config`. GitHub
+      would then hold no secrets.
+    - **What retires:** `sync.yml` and the keepalive.
+  - **A small always-on host with cron:** a few dollars a month. The same
+    four secrets go in an env file on that host.
+  - **Cloudflare Workers Cron:** free, but the sync would need porting off
+    Node's file APIs.
+  - **The Mac:** ruled out (C).
+- **Recommendation:** no emergency. If the account's standing matters for
+  applications, plan a move to Cloud Run Jobs at a calm time, and keep the
+  GitHub footprint small meanwhile, as now: a 20-minute cadence, no D.

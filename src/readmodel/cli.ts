@@ -39,6 +39,7 @@ import { AppError } from '../core/errors.ts';
 import { Config } from '../core/config.ts';
 import type { RunContext } from '../core/run-context.ts';
 import { publishReadModel } from './publish.ts';
+import { fetchWithTimeout } from '../core/db/timeout-fetch.ts';
 import { READMODEL_DDL, READMODEL_SCHEMA_VERSION } from './schema.ts';
 
 const env = (k: string): string => {
@@ -54,7 +55,11 @@ export function readModelConfigured(): boolean {
 
 /** The read model's URL and a token for it; the publisher's client. */
 export function readModelClient(token: 'write' | 'read'): Client {
-  return createClient({ url: env('READMODEL_DATABASE_URL'), authToken: env(token === 'write' ? 'READMODEL_WRITE_TOKEN' : 'READMODEL_READ_TOKEN') });
+  return createClient({
+    url: env('READMODEL_DATABASE_URL'),
+    authToken: env(token === 'write' ? 'READMODEL_WRITE_TOKEN' : 'READMODEL_READ_TOKEN'),
+    fetch: fetchWithTimeout(), // D-77: a stalled read model must not hold the sync
+  });
 }
 
 /** The HTTP status behind a libsql error, if any: the client keeps it on the error's `cause`. */

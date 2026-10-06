@@ -13,6 +13,14 @@ describe('sync schedule', () => {
     assert.deepEqual(inYaml, [...SYNC_SCHEDULES], 'code and workflow disagree about when syncs run');
   });
 
+  it('grants the sync job read access to Actions runs, and nothing that writes (D-77)', async () => {
+    const yaml = await readFile(WORKFLOW, 'utf8');
+    assert.doesNotMatch(yaml, /:\s*write\b/, 'no write permission anywhere');
+    assert.match(yaml, /^permissions:\n  contents: read\n\njobs:/m, 'the workflow default stays contents: read only');
+    assert.match(yaml, /^  sync:\n(?:    #[^\n]*\n|    runs-on:[^\n]*\n)*    permissions:\n      contents: read\n      actions: read\n/m, 'the sync job: contents and actions, read only');
+    assert.match(yaml, /ACTIONS_READ_TOKEN: \$\{\{ github\.token \}\}/);
+  });
+
   it('has no concurrency group (D-46)', async () => {
     // One job never assigned a runner held the group for 24 hours and the
     // group cancelled the 51 runs queued behind it. Do not reintroduce it.
@@ -27,14 +35,14 @@ describe('sync schedule', () => {
   });
 
   it('counts nothing between consecutive slots, by day, by night and across the switch', () => {
-    assert.equal(slotsBetween(new Date('2026-09-17T04:07:00Z'), new Date('2026-09-17T04:17:00Z')), 0);
+    assert.equal(slotsBetween(new Date('2026-09-17T04:07:00Z'), new Date('2026-09-17T04:27:00Z')), 0);
     assert.equal(slotsBetween(new Date('2026-09-17T16:13:00Z'), new Date('2026-09-17T16:43:00Z')), 0);
-    assert.equal(slotsBetween(new Date('2026-09-17T14:57:00Z'), new Date('2026-09-17T15:13:00Z')), 0, 'day to night');
+    assert.equal(slotsBetween(new Date('2026-09-17T14:47:00Z'), new Date('2026-09-17T15:13:00Z')), 0, 'day to night');
     assert.equal(slotsBetween(new Date('2026-09-17T23:43:00Z'), new Date('2026-09-18T00:07:00Z')), 0, 'night to day');
   });
 
-  it('has 108 slots a day: every 10 minutes for 15 hours, every 30 for 9 (D-75)', () => {
-    assert.equal(slotsBetween(new Date('2026-09-13T04:07:00Z'), new Date('2026-09-14T04:17:00Z')), 108);
+  it('has 63 slots a day: every 20 minutes for 15 hours, every 30 for 9 (D-77)', () => {
+    assert.equal(slotsBetween(new Date('2026-09-13T04:07:00Z'), new Date('2026-09-14T04:27:00Z')), 63);
   });
 
   it('counts overnight gaps in half-hour slots', () => {
@@ -48,7 +56,7 @@ describe('sync schedule', () => {
     assert.ok(minutes.every((m) => Number.isInteger(m) && !busy.has(m)), `slot minutes ${minutes.join(',')}`);
   });
 
-  it('reports from three missed slots: 30 minutes by day, 90 at night', () => {
+  it('reports from three missed slots: an hour by day, 90 minutes at night', () => {
     assert.equal(MISSED_SLOTS_REPORT_THRESHOLD, 3);
   });
 });

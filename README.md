@@ -291,7 +291,29 @@ overwrites; writes nowhere else.
    Otherwise OneDrive leaves files online-only, and macOS refuses to download
    them for a background job. The mirror then defers them with "Unknown system
    error -11" (D-73).
-9. **Stalls tell you.** If a file has waited more than 24 hours to be copied,
+9. **The download helper.** Pinning alone did not keep new files downloaded
+   (D-76), so the mirror hands a file macOS refused it (error -11) to a tiny
+   helper. The helper downloads the file as the mirror's own child, then the
+   copy is tried again (D-77). Its source is `native/materialize.c`; build it
+   on this Mac:
+   ```
+   node scripts/build-materialize.ts
+   ```
+   This writes `var/runtime/bin/materialize`, never committed. Then test that
+   the mirror keeps its OneDrive permission, exactly as launchd runs it:
+   1. In Finder, pick one archived file and choose **Remove Download**, so it is
+      online-only.
+   2. Run, with that file's path inside the archive:
+      ```
+      node scripts/mirror-schedule.ts --materialize-test '<term>/<module>/<folder>/<file>'
+      ```
+   3. Read the result: `tail -1 var/mirror/materialize-test.log`. Expect
+      `"before":"refused (... online-only: -11)"`, `"helper_exit":0`,
+      `"after":"ok (… bytes)"`, `"ok":true`. You should see no new permission
+      prompt. `asking_binary` is the mirror's own node.
+   4. Remove the test agent:
+      `node scripts/mirror-schedule.ts --remove-materialize-test`.
+10. **Stalls tell you.** If a file has waited more than 24 hours to be copied,
    the mirror shows a macOS notification saying how many and why, at most
    once a day, and another when it clears (D-74). It is on this Mac only:
    nothing reaches your phone, and the Mac holds no extra credential for it.

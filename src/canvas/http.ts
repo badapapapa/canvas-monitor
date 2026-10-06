@@ -26,7 +26,7 @@ import { parseLinkHeader } from './paginate.ts';
 import type { RateLimitGovernor } from './rate-limit.ts';
 import type { RawStore } from './raw-store.ts';
 import { failure, ok, deniedOrAbsent, type Result } from '../core/result.ts';
-import { sleep, type Clock } from '../core/clock.ts';
+import { budgetNow, sleep, type Clock } from '../core/clock.ts';
 import type { Logger } from '../core/log.ts';
 
 export type QueryValue = string | number | boolean | readonly (string | number)[] | undefined;
@@ -72,12 +72,23 @@ export class CanvasHttp {
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly doFetch: typeof fetch;
+  /** Wall-clock ms after which no request starts and none runs on (D-77); null: no deadline. */
+  private deadline: number | null = null;
 
   constructor(options: CanvasHttpOptions) {
     this.options = options;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxAttempts = options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
     this.doFetch = options.fetchImpl ?? fetch;
+  }
+
+  /**
+   * A deadline for the requests that follow (D-77): a slow course, or a slow
+   * Canvas, fails its own part once its time is used, instead of holding the
+   * whole run. Each request's timeout shrinks to fit; null lifts it.
+   */
+  setDeadline(deadline: number | null): void {
+    this.deadline = deadline;
   }
 
   /** A single object endpoint. */
@@ -155,6 +166,11 @@ export class CanvasHttp {
     return ok(body);
   }
 
+  /** Whether waiting this long still leaves time before the deadline. */
+  private fitsBeforeDeadline(waitMs: number): boolean {
+    return this.deadline === null || budgetNow() + waitMs < this.deadline;
+  }
+
   private buildUrl(pathOrUrl: string, query: Query): string {
     if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) return pathOrUrl;
     const base = this.options.baseUrl.replace(/\/+$/, '');
@@ -175,6 +191,10 @@ export class CanvasHttp {
     let lastRetryable: Result<never> | null = null;
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
+      const left = this.deadline === null ? Number.POSITIVE_INFINITY : this.deadline - budgetNow();
+      if (left <= 0) {
+        return lastRetryable ?? failure(endpoint, 'timeout', 'time budget used up before this request', { retryable: false });
+      }
       await this.options.governor.beforeRequest();
 
       const startedAt = this.options.clock.now().getTime();
@@ -188,7 +208,7 @@ export class CanvasHttp {
             accept: 'application/json',
           },
           redirect: 'follow',
-          signal: AbortSignal.timeout(this.timeoutMs),
+          signal: AbortSignal.timeout(Math.max(1, Math.min(this.timeoutMs, this.deadline === null ? this.timeoutMs : this.deadline - budgetNow()))),
         });
         bodyText = await response.text();
       } catch (error) {
@@ -198,8 +218,9 @@ export class CanvasHttp {
           isTimeout ? 'timeout' : 'network',
           error instanceof Error ? error.message : String(error),
         );
-        if (attempt < this.maxAttempts) {
-          await sleep(backoffMs(attempt, undefined));
+        const wait = backoffMs(attempt, undefined);
+        if (attempt < this.maxAttempts && this.fitsBeforeDeadline(wait)) {
+          await sleep(wait);
           continue;
         }
         return lastRetryable;
@@ -244,8 +265,8 @@ export class CanvasHttp {
             status: response.status,
             retryable: true,
           });
-          if (attempt < this.maxAttempts) {
-            const waitMs = backoffMs(attempt, classification.retryAfterMs);
+          const waitMs = backoffMs(attempt, classification.retryAfterMs);
+          if (attempt < this.maxAttempts && this.fitsBeforeDeadline(waitMs)) {
             this.options.log.warn('canvas.request.retrying', {
               endpoint,
               status: response.status,

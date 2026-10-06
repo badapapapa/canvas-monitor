@@ -6,11 +6,11 @@
 import { strict as assert } from 'node:assert';
 import { after, describe, it } from 'node:test';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
+import { realpathSync, chmodSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync, existsSync, lstatSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { MirrorGuard, MirrorGuardError, type MirrorRoots } from '../../src/mirror/guard.ts';
-import { MirrorRefusal, runMirror, type ArchiveFile, type MirrorState } from '../../src/mirror/mirror.ts';
+import { MirrorRefusal, runMirror, type ArchiveFile, type MirrorState, isDatalessRefusal } from '../../src/mirror/mirror.ts';
 
 const temps: string[] = [];
 after(() => temps.forEach((d) => rmSync(d, { recursive: true, force: true })));
@@ -66,11 +66,13 @@ function world() {
     rmSync(from);
     f.targetPath = to;
   };
-  const run = (opts: { mode?: 'baseline' | 'run'; dryRun?: boolean } = {}) =>
+  const run = (opts: { mode?: 'baseline' | 'run'; dryRun?: boolean; materialize?: (src: string) => boolean; isDatalessRefusal?: (e: unknown) => boolean } = {}) =>
     runMirror({
       archiveRoot, guard: new MirrorGuard(roots), files: [...files], state, mode: opts.mode ?? 'run', dryRun: opts.dryRun ?? false,
       now: () => new Date('2026-09-22T10:00:00Z'), tmpDir: path.join(base, 'var', 'mirror', 'tmp'),
       saveState: (s) => void (state = structuredClone(s)),
+      ...(opts.materialize === undefined ? {} : { materialize: opts.materialize }),
+      ...(opts.isDatalessRefusal === undefined ? {} : { isDatalessRefusal: opts.isDatalessRefusal }),
     });
   const sub = (m = 'ab1234') => path.join(destinationRoot, 'year2-sem1', m, 'Downloaded from Canvas');
   const outside = () => snapshot(base, (p) => p.includes(`${path.sep}Downloaded from Canvas`) || p.startsWith(path.join(base, 'var')));
@@ -257,5 +259,59 @@ describe('mirror guard: writes only inside the "Downloaded from Canvas" folders'
     await w.run();
     assert.equal(snapshot(w.archiveRoot), archiveBefore);
     assert.equal(statSync(path.join(w.archiveRoot, '2610', 'AB1234', '_unsorted', 'b.pdf')).mtimeMs, statBefore);
+  });
+});
+
+describe('mirror: online-only files macOS refuses to download (D-77)', () => {
+  // A file the job cannot read stands in for an online-only one: chmod 000 gives
+  // EACCES, which the test treats as the -11 refusal; the "helper" restores it.
+  const setup = async () => {
+    const w = world();
+    await w.run({ mode: 'baseline' });
+    const f = w.archive('f9', '2610/AB1234/Labs/Lab 05.pdf', 'lab five');
+    const src = path.join(w.archiveRoot, ...f.targetPath.split('/'));
+    chmodSync(src, 0o000);
+    return { w, src };
+  };
+  const refused = (e: unknown) => (e as NodeJS.ErrnoException).code === 'EACCES';
+
+  it('hands a refused file to the helper, then copies it in the same run', async () => {
+    const { w, src } = await setup();
+    const asked: string[] = [];
+    const report = await w.run({ isDatalessRefusal: refused, materialize: (p) => { asked.push(p); chmodSync(p, 0o644); return true; } });
+    assert.deepEqual(asked, [realpathSync(src)], 'the helper got the guard-approved (resolved) archive path, once');
+    assert.ok(asked[0]!.startsWith(realpathSync(w.archiveRoot)));
+    assert.deepEqual(report.materialized, ['f9']);
+    assert.equal(report.deferred.length, 0);
+    assert.equal(readFileSync(path.join(w.sub(), 'Labs', 'Lab 05.pdf'), 'utf8'), 'lab five');
+  });
+
+  it('defers it, as before, when the helper cannot fetch it or is not built', async () => {
+    const a = await setup();
+    const failed = await a.w.run({ isDatalessRefusal: refused, materialize: () => false });
+    assert.equal(failed.deferred.length, 1);
+    assert.deepEqual(failed.materialized, []);
+    const b = await setup();
+    const none = await b.w.run({ isDatalessRefusal: refused });
+    assert.equal(none.deferred.length, 1);
+    chmodSync(a.src, 0o644);
+    chmodSync(b.src, 0o644);
+  });
+
+  it('never calls the helper for any other read error', async () => {
+    const { w, src } = await setup();
+    let called = 0;
+    const report = await w.run({ isDatalessRefusal: () => false, materialize: () => { called += 1; return true; } });
+    assert.equal(called, 0);
+    assert.equal(report.deferred.length, 1);
+    chmodSync(src, 0o644);
+  });
+
+  it('recognises the -11 refusal by errno, code or message', () => {
+    assert.equal(isDatalessRefusal(Object.assign(new Error('x'), { errno: -11 })), true);
+    assert.equal(isDatalessRefusal(Object.assign(new Error('x'), { code: 'EDEADLK' })), true);
+    assert.equal(isDatalessRefusal(new Error('Unknown system error -11: Unknown system error -11, read')), true);
+    assert.equal(isDatalessRefusal(Object.assign(new Error('x'), { code: 'EACCES', errno: -13 })), false);
+    assert.equal(isDatalessRefusal(new Error('Unknown system error -110')), false);
   });
 });

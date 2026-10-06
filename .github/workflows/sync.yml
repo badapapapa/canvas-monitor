@@ -1,11 +1,12 @@
 # Canvas sync. SPEC.md section 11; DECISIONS.md D-07, D-10, D-43.
 #
-# Adaptive cadence, expressed in UTC because Actions cron is UTC-only (D-75):
-#   every 10 min 08:07-22:57 SGT  ->  :07 :17 :27 :37 :47 :57, 00-14 UTC
+# Adaptive cadence, expressed in UTC because Actions cron is UTC-only (D-75, D-77):
+#   every 20 min 08:07-22:47 SGT  ->  :07 :27 :47, 00-14 UTC
 #   every 30 min 23:13-07:43 SGT  ->  :13 :43, 15-23 UTC
-# 108 runs/day. Off the top of the hour and off :00/:15/:20/:30/:40/:45, where
-# GitHub's scheduler is busiest and most likely to delay or drop an event. A
-# dropped slot now costs 10 minutes by day. The database lock prevents overlap.
+# 63 runs/day. Off the top of the hour and off :00/:15/:20/:30/:40/:45, where
+# GitHub's scheduler is busiest. A 10-minute daytime cron was thinned by GitHub
+# to about every 25 minutes anyway (D-76), so it only doubled our Actions use.
+# The database lock prevents overlap.
 # Unlimited minutes because this repository is public (D-10).
 #
 # Everything this job prints is public. Logs are redacted by default and
@@ -15,7 +16,7 @@ name: sync
 
 on:
   schedule:
-    - cron: '7,17,27,37,47,57 0-14 * * *'
+    - cron: '7,27,47 0-14 * * *'
     - cron: '13,43 15-23 * * *'
   workflow_dispatch: {}
 
@@ -37,6 +38,12 @@ permissions:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    # This job only: read this repository's own Actions run history, so a gap
+    # report can say what happened to the runs in the gap (D-77). Read-only,
+    # job-scoped, expires with the run; the repository is public anyway.
+    permissions:
+      contents: read
+      actions: read
     # Shorter than the 15-minute sync_lock staleness window, so a hung run
     # cannot outlive its own lock and let the next run overlap it (D-07).
     timeout-minutes: 10
@@ -72,3 +79,6 @@ jobs:
           # GitHub exposes which cron fired, not when it was meant to. The run
           # reconstructs its slot from this to measure drift (D-43).
           CRON_SCHEDULE: ${{ github.event.schedule }}
+          # The job's own token, under a name that says what it is for (D-77).
+          # With the permissions above it can only read: no write, no secrets.
+          ACTIONS_READ_TOKEN: ${{ github.token }}

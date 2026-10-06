@@ -12,6 +12,7 @@
  * at-least-once cost, stated rather than hidden.
  */
 
+import { budgetNow } from '../core/clock.ts';
 import { followupLabel, type FollowupCategory } from '../followups/classify.ts';
 import { sha256 } from '../ingest/normalise.ts';
 import { isQuietHours, quietHoursReleaseAt } from '../core/time.ts';
@@ -165,6 +166,8 @@ export interface FlushOutcome {
   retrying: number;
   failed: number;
   stillHeld: number;
+  /** Due, but left for the next run because the time budget was used up (D-77). */
+  leftQueued: number;
   messages: number;
   /** Rendered messages, populated only under dry-run, for preview. */
   preview: Array<{ channel: 'content' | 'ops'; text: string }>;
@@ -181,12 +184,12 @@ export interface Chats {
  * during quiet hours (DECISIONS.md D-42).
  */
 export async function flush(
-  env: { db: Db; log: Logger; now: Date; dryRun: boolean },
+  env: { db: Db; log: Logger; now: Date; dryRun: boolean; /** Wall-clock ms: no new message starts after this (D-77). */ deadline?: number },
   telegram: TelegramClient | null,
   chats: Chats | null,
 ): Promise<FlushOutcome> {
   const nowIso = env.now.toISOString();
-  const outcome: FlushOutcome = { sent: 0, retrying: 0, failed: 0, stillHeld: 0, messages: 0, preview: [] };
+  const outcome: FlushOutcome = { sent: 0, retrying: 0, failed: 0, stillHeld: 0, leftQueued: 0, messages: 0, preview: [] };
 
   const due = await env.db.read({
     sql: `SELECT id, channel, release_after, attempts, payload FROM notifications
@@ -230,6 +233,12 @@ export async function flush(
   const silent = isQuietHours(env.now);
 
   for (const unit of units) {
+    // D-77: past the deadline, the rest stay queued for the next run, so this
+    // one can still release the lock and ping Healthchecks.
+    if (!env.dryRun && env.deadline !== undefined && budgetNow() >= env.deadline) {
+      outcome.leftQueued += unit.ids.length;
+      continue;
+    }
     if (env.dryRun || telegram === null || chats === null) {
       for (const text of unit.messages) outcome.preview.push({ channel: unit.channel, text });
       if (!env.dryRun) {

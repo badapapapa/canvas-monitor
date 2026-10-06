@@ -35,6 +35,15 @@ export function tickingClock(iso: string, stepMs: number): Clock {
   };
 }
 
+/**
+ * Elapsed wall time in ms, for time BUDGETS only (D-77): deadlines that must
+ * advance even when a test freezes the run's Clock. Never for a timestamp
+ * that is stored or compared with Canvas -- that is what Clock is for.
+ */
+export function budgetNow(): number {
+  return Date.now();
+}
+
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }

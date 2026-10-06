@@ -55,6 +55,8 @@ import type { CoverageStatus } from '../discover/coverage.ts';
 import { loadMigrations } from '../core/db/migrate.ts';
 import { ping } from './healthcheck.ts';
 import { MISSED_SLOTS_REPORT_THRESHOLD, slotsBetween } from './schedule.ts';
+import { DEFAULT_BUDGETS, RunBudget, type Budgets } from './budget.ts';
+import { describeGap, explainGap, gapRunsFromEnvironment, type GapExplanation, type GapRunsLookup } from './gap-runs.ts';
 
 /** SPEC.md section 12: a deadline inside this window overrides quiet hours. */
 export const URGENT_WINDOW_MS = 12 * 3600_000;
@@ -99,6 +101,10 @@ export interface SyncOptions {
   loginBase?: string;
   /** Test seam: the read model's database client (otherwise from the environment). */
   readModel?: import('@libsql/client').Client;
+  /** Test seam: smaller time budgets (D-77). */
+  budgets?: Partial<Budgets>;
+  /** Test seam: what GitHub knows about the scheduled runs inside a gap (D-77). */
+  gapRuns?: GapRunsLookup;
 }
 
 export interface SyncOutcome {
@@ -380,23 +386,23 @@ async function syncBody(
     });
   }
 
-  const canvas = new CanvasClient(
-    new CanvasHttp({
-      baseUrl: config.require('canvas_base_url'),
-      token: config.require('canvas_token'),
+  const budget = new RunBudget({ ...DEFAULT_BUDGETS, ...options.budgets });
+  const http = new CanvasHttp({
+    baseUrl: config.require('canvas_base_url'),
+    token: config.require('canvas_token'),
+    log: ctx.log,
+    clock: ctx.clock,
+    governor: new RateLimitGovernor(ctx.log),
+    rawStore: createRawStore({
+      runId: ctx.runId,
+      // Off under CI: the runner's disk is discarded at job end, so a capture
+      // there is pure cost -- and one less place real responses could sit.
+      enabled: config.getBoolean('raw_capture_enabled', true) && !ctx.ci,
       log: ctx.log,
       clock: ctx.clock,
-      governor: new RateLimitGovernor(ctx.log),
-      rawStore: createRawStore({
-        runId: ctx.runId,
-        // Off under CI: the runner's disk is discarded at job end, so a capture
-        // there is pure cost -- and one less place real responses could sit.
-        enabled: config.getBoolean('raw_capture_enabled', true) && !ctx.ci,
-        log: ctx.log,
-        clock: ctx.clock,
-      }),
     }),
-  );
+  });
+  const canvas = new CanvasClient(http);
 
   const self = await canvas.getSelf();
   if (self.kind !== 'ok') {
@@ -424,13 +430,24 @@ async function syncBody(
   outcome.contexts = contexts.length;
 
   const courses = contexts.filter((c) => c.contextType === 'course');
+  http.setDeadline(budget.deadlineFor(budget.budgets.courseMs));
   const announcements = await fetchAnnouncements(ctx, canvas, courses, now);
+  http.setDeadline(null);
   const webBase = config.require('canvas_base_url').replace(/\/api\/v1\/?$/, '');
   const watching: WatchingPayload = { kind: 'watching', contexts: [] };
   const baselinedScope: string[] = [];
   const coverageNow = new Map<number, CoverageStatus>();
 
   for (const context of contexts) {
+    // D-77: a course that would start after the work deadline is left for the
+    // next run, so this one still finishes, releases the lock and pings.
+    if (budget.workExhausted()) {
+      outcome.failedContexts += 1;
+      ctx.log.warn('sync.context_deferred', { context_id: context.contextId, reason: 'run time budget used up' });
+      continue;
+    }
+    // D-77: at most courseMs of Canvas requests for this course; a slow one fails alone.
+    http.setDeadline(budget.deadlineFor(budget.budgets.courseMs));
     try {
       const result = await syncContext(ctx, canvas, context, {
         announcements: context.contextType === 'course' ? (announcements.get(context.canvasId) ?? ok([])) : undefined,
@@ -460,6 +477,8 @@ async function syncBody(
     } catch (error) {
       outcome.failedContexts += 1;
       ctx.log.error('sync.context_failed', { context_id: context.contextId, reason: messageOf(error) });
+    } finally {
+      http.setDeadline(null);
     }
   }
 
@@ -472,7 +491,10 @@ async function syncBody(
   // uploaded in this run already carries its OneDrive link when sent (D-52).
   if (config.getBoolean('archive_enabled', false)) {
     const drive = ctx.dryRun ? null : buildDrive(ctx, config, options);
-    outcome.archive = await runArchive({ ctx, canvas, canvasToken: config.require('canvas_token'), drive, config });
+    // D-77: the archive keeps its own 240 s cap, and never runs past the work deadline.
+    http.setDeadline(budget.workDeadline);
+    outcome.archive = await runArchive({ ctx, canvas, canvasToken: config.require('canvas_token'), drive, config, maxMs: budget.remainingWork() });
+    http.setDeadline(null);
     if (!ctx.dryRun) {
       alerts.push(...archiveAlerts(outcome.archive));
       alerts.push(...(await driveReachability(ctx, config, outcome.archive, now)));
@@ -488,7 +510,7 @@ async function syncBody(
       const unusable: ReadonlyArray<string | null> = ['graph_auth', 'graph_app', 'provisioning', 'not_personal', 'unreachable'];
       if (drive !== null && !unusable.includes(a.stopped)) {
         try {
-          outcome.integrity = await checkArchiveIntegrity(ctx, drive, now);
+          outcome.integrity = await checkArchiveIntegrity(ctx, drive, now, undefined, budget.deadlineFor(budget.budgets.integrityMs));
           const integrity = await integrityAlert(ctx);
           if (integrity !== null) alerts.push(integrity);
           evaluatedPrefixes.push('archive_integrity');
@@ -519,13 +541,15 @@ async function syncBody(
   // --- follow-ups (Phase 6): after the archive, BEFORE the flush, so a close
   // shows on the answer file's own notification in this run (D-61).
   if (config.getBoolean('followups_enabled', false)) {
+    http.setDeadline(budget.workDeadline);
     outcome.followups = await runFollowups(ctx, { config, canvas, now });
+    http.setDeadline(null);
   }
 
   alerts.push(...(await staleContextAlerts(ctx, contexts, coverageNow, now)));
   evaluatedPrefixes.push('context_stale:');
 
-  await reportScheduleGap(ctx, now);
+  await reportScheduleGap(ctx, now, options.gapRuns ?? gapRunsFromEnvironment());
   // No schedule condition is ever raised now; evaluating the prefix lets any
   // row left active by the old raise/resolve alert close itself.
   evaluatedPrefixes.push('schedule_health');
@@ -551,7 +575,7 @@ async function syncBody(
   const retired = await retireContextAlerts(ctx.db, new Set(contexts.map((c) => c.contextId)), now);
   if (retired.length > 0) ctx.log.info('sync.alerts_retired', { keys: retired });
   outcome.alerts = await reconcileAlerts(ctx.db, now, alerts, evaluatedPrefixes);
-  outcome.flush = await flush({ db: ctx.db, log: ctx.log, now, dryRun: ctx.dryRun }, telegram, chats);
+  outcome.flush = await flush({ db: ctx.db, log: ctx.log, now, dryRun: ctx.dryRun, deadline: budget.finishDeadline }, telegram, chats);
 
   outcome.status = outcome.flush.failed > 0 ? 'failed' : outcome.failedContexts > 0 ? 'partial' : 'ok';
   ctx.log.info('sync.summary', {
@@ -1115,7 +1139,7 @@ function coverageAlert(context: SyncContext, coverage: CoverageStatus, linked: n
  * wall time, so a 20-minute daytime cadence and an hourly overnight one are
  * both judged correctly.
  */
-async function reportScheduleGap(ctx: RunContext, now: Date): Promise<void> {
+async function reportScheduleGap(ctx: RunContext, now: Date, lookup: GapRunsLookup): Promise<void> {
   const thisSlot = ctx.scheduledFor;
   if (thisSlot === undefined) return;
   const previous = await ctx.db.read({
@@ -1132,6 +1156,21 @@ async function reportScheduleGap(ctx: RunContext, now: Date): Promise<void> {
   if (missed < MISSED_SLOTS_REPORT_THRESHOLD) return;
 
   const hours = (thisSlot.getTime() - prevSlot.getTime()) / 3600_000;
+
+  // D-77: ask GitHub what became of the runs it created inside the gap. A run
+  // that reached our sync has a `runs` row (host gha:<id>); one that did not
+  // was cancelled, failed before starting, or is still waiting.
+  const ghRuns = await lookup(new Date(prevSlot.getTime() + 60_000), ctx.startedAt);
+  let explanation: GapExplanation | null = null;
+  if (ghRuns !== null) {
+    const hosts = ghRuns.map((r) => `gha:${r.id}`);
+    const started = hosts.length === 0 ? [] : (await ctx.db.read({
+      sql: `SELECT host FROM runs WHERE host IN (${hosts.map(() => '?').join(', ')})`,
+      args: hosts,
+    })).rows.map((r) => String(r['host']).slice('gha:'.length));
+    explanation = explainGap(missed, ghRuns, new Set(started));
+  }
+
   await enqueueOps(ctx.db, {
     // Keyed on the gap itself, so a retried run cannot report it twice.
     sendKey: `schedule_gap ${prevSlot.toISOString()}..${thisSlot.toISOString()}`,
@@ -1140,12 +1179,20 @@ async function reportScheduleGap(ctx: RunContext, now: Date): Promise<void> {
       severity: 'warn',
       summary: `Scheduled syncs stopped for ${hours.toFixed(1)} h and have now resumed.`,
       detail:
-        `${missed} scheduled run${missed === 1 ? '' : 's'} never happened; the last one before the gap ` +
-        `was for ${formatSgt(prevSlot.toISOString())}. This run re-read every course, so anything posted ` +
-        'in that window has now been checked. If this repeats, look in GitHub Actions for sync runs ' +
-        'that were queued for hours or cancelled.',
+        `${describeGap(missed, explanation)} The last sync before the gap was for ` +
+        `${formatSgt(prevSlot.toISOString())}. This run re-read every course, so anything posted ` +
+        'in that window has now been checked.',
     },
     now,
   });
-  ctx.log.warn('sync.schedule_gap', { missed_slots: missed, gap_hours: Number(hours.toFixed(2)) });
+  ctx.log.warn('sync.schedule_gap', {
+    missed_slots: missed,
+    gap_hours: Number(hours.toFixed(2)),
+    ...(explanation === null ? { github_history: 'unavailable' } : {
+      cancelled_before_start: explanation.cancelled,
+      failed_before_start: explanation.failedBeforeStart,
+      still_waiting: explanation.stillWaiting,
+      never_created: explanation.neverCreated,
+    }),
+  });
 }

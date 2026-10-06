@@ -54,6 +54,7 @@ Commands:
                            add --module <code> --field folder|module|filename|extension
                                --pattern <regex|ext,list> --target <folder> [--priority N]
   mirror [--baseline]      Local only: copy NEW archive files into my own folders (D-58).
+  mirror --materialize-test <archive path>   Read one online-only file, run the helper, read again (D-77).
   tune-patterns            Read-only: rank the words that mark answer files, with their pairs (D-61).
   followups [preview]      Read-only: what follow-ups would open, close and ignore (D-61).
   followups list [--all]   Open follow-ups (--all: every state).
@@ -112,6 +113,7 @@ async function main(argv: string[]): Promise<number> {
         target: { type: 'string' },
         priority: { type: 'string' },
         baseline: { type: 'boolean', default: false },
+        'materialize-test': { type: 'string' },
         config: { type: 'string' },
         phrase: { type: 'string' },
         draft: { type: 'string' },
@@ -169,7 +171,7 @@ async function main(argv: string[]): Promise<number> {
     case 'migrate':
       return await withoutRunRecord('migrate', dryRun);
     case 'mirror':
-      return await runMirrorCli({ dryRun, baseline: values.baseline === true, config: values.config });
+      return await runMirrorCli({ dryRun, baseline: values.baseline === true, config: values.config, materializeTest: values['materialize-test'] });
     case 'readmodel':
       // The main database is opened read-only: every write here goes to the
       // SEPARATE read-model database, through its own token (D-65).

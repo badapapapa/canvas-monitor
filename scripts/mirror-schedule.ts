@@ -6,13 +6,15 @@
  *   node scripts/mirror-schedule.ts            # print, change nothing
  *   node scripts/mirror-schedule.ts --install  # only once approved
  *   node scripts/mirror-schedule.ts --uninstall
+ *   node scripts/mirror-schedule.ts --materialize-test <archive path>   # D-77: one-shot test agent
+ *   node scripts/mirror-schedule.ts --remove-materialize-test
  *
  * The plist runs the mirror's OWN copy of node (var/runtime/bin/node, made by
  * scripts/mirror-runtime.ts, D-59), so the macOS file-access grant belongs to
  * that binary alone and survives `brew upgrade node`.
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, userInfo } from 'node:os';
 import path from 'node:path';
@@ -49,6 +51,44 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
 
 const arg = process.argv[2];
 const domain = `gui/${userInfo().uid}`;
+
+// D-77: a one-shot agent that runs the permission test exactly as the mirror
+// runs -- same node, same launchd domain, same Background process type -- once.
+const TEST_LABEL = 'local.canvas-monitor.materialize-test';
+const testPlistPath = path.join(homedir(), 'Library', 'LaunchAgents', `${TEST_LABEL}.plist`);
+const testLogPath = path.join(repo, 'var', 'mirror', 'materialize-test.log');
+const testPlist = (archivePath: string) => plist
+  .replace(`<string>${LABEL}</string>`, `<string>${TEST_LABEL}</string>`)
+  .replace('    <string>mirror</string>\n', `    <string>mirror</string>\n    <string>--materialize-test</string>\n    <string>${esc(archivePath)}</string>\n`)
+  .replace('  <key>StartInterval</key><integer>1200</integer>\n', '')
+  .replaceAll(esc(logPath), esc(testLogPath));
+
+if (arg === '--materialize-test') {
+  const archivePath = process.argv[3];
+  if (archivePath === undefined || archivePath.startsWith('/') || archivePath.split('/').includes('..')) {
+    process.stderr.write('Usage: node scripts/mirror-schedule.ts --materialize-test <term>/<module>/<folder>/<file>  (a path inside the archive)\n');
+    process.exit(2);
+  }
+  if (node !== runtimeNode) {
+    process.stderr.write(`Refusing: the mirror's own node is missing.\nRun:  node scripts/mirror-runtime.ts\n`);
+    process.exit(2);
+  }
+  mkdirSync(path.dirname(testLogPath), { recursive: true });
+  mkdirSync(path.dirname(testPlistPath), { recursive: true });
+  writeFileSync(testPlistPath, testPlist(archivePath));
+  execFileSync('launchctl', ['bootstrap', domain, testPlistPath], { stdio: 'inherit' });
+  process.stdout.write(`Loaded the one-shot test (it runs now). Result: tail -1 ${testLogPath}\nThen remove it: node scripts/mirror-schedule.ts --remove-materialize-test\n`);
+  process.exit(0);
+}
+if (arg === '--remove-materialize-test') {
+  if (existsSync(testPlistPath)) {
+    spawnSync('launchctl', ['bootout', domain, testPlistPath], { stdio: 'inherit' });
+    rmSync(testPlistPath);
+  }
+  process.stdout.write('Test agent removed.\n');
+  process.exit(0);
+}
+
 if (arg === '--install' && node !== runtimeNode) {
   process.stderr.write(`Refusing to install: the mirror's own node is missing.\nRun:  node scripts/mirror-runtime.ts\n`);
   process.exit(2);

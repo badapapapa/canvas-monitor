@@ -7,10 +7,12 @@
  * log in var/mirror/mirror.log.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { startRun } from '../core/run-context.ts';
+import { systemClock } from '../core/clock.ts';
 import { AppError } from '../core/errors.ts';
 import { MirrorGuard, type MirrorRoots } from '../mirror/guard.ts';
 import { loadState, runMirror, saveStateFile, type ArchiveFile, type MirrorReport } from '../mirror/mirror.ts';
@@ -20,6 +22,13 @@ const STATE_FILE = path.join('var', 'mirror', 'state.json');
 const LOG_FILE = path.join('var', 'mirror', 'mirror.log');
 const TMP_DIR = path.join('var', 'mirror', 'tmp');
 const STALL_FILE = path.join('var', 'mirror', 'stall.json');
+/** Built by scripts/build-materialize.ts from native/materialize.c; never committed (D-77). */
+const HELPER = path.resolve('var', 'runtime', 'bin', 'materialize');
+
+/** Run the helper on one guard-approved archive file: true if it read the file through. */
+function materializeWithHelper(source: string): boolean {
+  return spawnSync(HELPER, [source], { stdio: 'ignore', timeout: 180_000 }).status === 0;
+}
 
 const expand = (p: string): string => (p.startsWith('~/') ? path.join(homedir(), p.slice(2)) : p);
 
@@ -32,7 +41,7 @@ export function loadMirrorConfig(file: string): MirrorRoots {
   return { ...(raw as MirrorRoots), archiveRoot: expand(raw.archiveRoot!), destinationRoot: expand(raw.destinationRoot!) };
 }
 
-export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; config: string | undefined }): Promise<number> {
+export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; config: string | undefined; materializeTest?: string | undefined }): Promise<number> {
   if (process.env['CI'] === 'true' || process.env['GITHUB_ACTIONS'] === 'true') throw new AppError('usage', 'the mirror is local only');
   const roots = loadMirrorConfig(opts.config ?? 'mirror.config.json');
   try {
@@ -46,6 +55,7 @@ export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; c
       : `archive folder not readable (${code ?? 'unknown'}; is OneDrive running?): ${roots.archiveRoot}`);
   }
   const guard = new MirrorGuard(roots);
+  if (opts.materializeTest !== undefined) return materializeTest(roots.archiveRoot, guard, opts.materializeTest);
 
   // dry_run in the log means --dry-run, nothing else. The archive database is
   // opened read-only whatever the flag says, so this command cannot write to
@@ -71,6 +81,7 @@ export async function runMirrorCli(opts: { dryRun: boolean; baseline: boolean; c
     now: () => ctx.clock.now(),
     tmpDir: TMP_DIR,
     saveState: (s) => saveStateFile(STATE_FILE, s),
+    ...(existsSync(HELPER) && !opts.dryRun ? { materialize: materializeWithHelper } : {}),
   });
   print(report, files.length);
   if (!opts.dryRun) {
@@ -97,11 +108,41 @@ function print(r: MirrorReport, archived: number): void {
     out.write(r.dryRun ? `Nothing written. To take it for real:  npm run mirror -- --baseline\n\n` : `State saved to ${STATE_FILE}.\n\n`);
     return;
   }
-  out.write(`\n${dry}${r.copied.length} ${r.dryRun ? 'to copy' : 'copied'}, ${r.adopted.length} already there, ${r.followed.length} ${r.dryRun ? 'to follow' : 'followed'} a re-route, ${r.deferred.length} deferred, ${r.skipped.length} skipped, ${r.left.length} left alone.\n`);
+  out.write(`\n${dry}${r.copied.length} ${r.dryRun ? 'to copy' : 'copied'}, ${r.adopted.length} already there, ${r.followed.length} ${r.dryRun ? 'to follow' : 'followed'} a re-route, ${r.deferred.length} deferred, ${r.materialized.length} downloaded first by the helper, ${r.skipped.length} skipped, ${r.left.length} left alone.\n`);
   for (const c of r.copied) out.write(`  copy    ${c.from}\n       -> ${c.to}\n`);
   for (const f of r.followed) out.write(`  follow  ${f.from}\n       -> ${f.to}\n`);
   for (const d of r.deferred) out.write(`  defer   ${d.from}: ${d.reason}\n`);
   for (const s of r.skipped) out.write(`  skip    ${s.from}: ${s.reason}\n`);
   for (const l of r.left) out.write(`  left    ${l.at}: ${l.reason}\n`);
   out.write('\n');
+}
+
+/**
+ * The permission test (D-77), meant to run under launchd exactly as the mirror
+ * does: read one archive file (an online-only one, made so on purpose), run the
+ * helper, read it again. Prints one line of results. Changes nothing.
+ */
+function materializeTest(archiveRoot: string, guard: MirrorGuard, relative: string): number {
+  const src = guard.readable(path.join(archiveRoot, ...relative.split('/')));
+  const readThrough = (): string => {
+    let fd: number | null = null;
+    try {
+      fd = openSync(src, 'r');
+      const buf = Buffer.alloc(1 << 16);
+      let total = 0;
+      for (let n = readSync(fd, buf); n > 0; n = readSync(fd, buf)) total += n;
+      return `ok (${total} bytes)`;
+    } catch (error) {
+      const e = error as NodeJS.ErrnoException;
+      return `refused (${e.code ?? e.errno ?? 'error'}${e.errno === -11 ? ', online-only: -11' : ''})`;
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+  };
+  const before = readThrough();
+  const helper = existsSync(HELPER) ? spawnSync(HELPER, [src], { stdio: 'ignore', timeout: 180_000 }).status : 'not built';
+  const after = readThrough();
+  const ok = after.startsWith('ok') && helper === 0;
+  process.stdout.write(`${JSON.stringify({ at: systemClock.now().toISOString(), materialize_test: { asking_binary: realpathSync(process.execPath), before, helper_exit: helper, after, ok } })}\n`);
+  return ok ? 0 : 1;
 }

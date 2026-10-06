@@ -120,8 +120,8 @@ const MUTATIONS: Mutation[] = [
   {
     name: 'archive integrity: file paths written to the public logs (D-74)',
     file: 'src/archive/integrity.ts',
-    from: "  ctx.log.info('archive.integrity', { checked: rows.rows.length, wrong });",
-    to: "  ctx.log.info('archive.integrity', { checked: rows.rows.length, wrong, paths: rows.rows.map((r) => String(r['target_path'])).join(' | ') });",
+    from: "  ctx.log.info('archive.integrity', { checked, wrong });",
+    to: "  ctx.log.info('archive.integrity', { checked, wrong, paths: rows.rows.map((r) => String(r['target_path'])).join(' | ') });",
     tests: [ARCHIVE],
   },
   {
@@ -169,9 +169,114 @@ const MUTATIONS: Mutation[] = [
   {
     name: "the gap alert's cron list out of step with the workflow (D-75)",
     file: 'src/sync/schedule.ts',
-    from: "export const SYNC_SCHEDULES = ['7,17,27,37,47,57 0-14 * * *', '13,43 15-23 * * *'] as const;",
+    from: "export const SYNC_SCHEDULES = ['7,27,47 0-14 * * *', '13,43 15-23 * * *'] as const;",
     to: "export const SYNC_SCHEDULES = ['*/20 0-14 * * *', '0 15-23 * * *'] as const;",
     tests: ['test/unit/schedule.test.ts'],
+  },
+  {
+    name: 'fail fast: Turso requests with no timeout (D-77)',
+    file: 'src/core/db/timeout-fetch.ts',
+    from: '    return base(input, { ...init, signal });',
+    to: '    return base(input, init);',
+    tests: ['test/unit/failfast.test.ts'],
+  },
+  {
+    name: 'fail fast: Canvas requests started after the deadline (D-77)',
+    file: 'src/canvas/http.ts',
+    from: '      if (left <= 0) {',
+    to: '      if (false) {',
+    tests: ['test/unit/failfast.test.ts'],
+  },
+  {
+    name: "fail fast: a Canvas request's timeout not shortened to the deadline (D-77)",
+    file: 'src/canvas/http.ts',
+    from: 'signal: AbortSignal.timeout(Math.max(1, Math.min(this.timeoutMs, this.deadline === null ? this.timeoutMs : this.deadline - budgetNow()))),',
+    to: 'signal: AbortSignal.timeout(this.timeoutMs),',
+    tests: ['test/unit/failfast.test.ts'],
+  },
+  {
+    name: 'fail fast: no per-course deadline, so a slow course holds the run (D-77)',
+    file: 'src/sync/run.ts',
+    from: '    http.setDeadline(budget.deadlineFor(budget.budgets.courseMs));\n    try {',
+    to: '    try {',
+    tests: [SYNC],
+  },
+  {
+    name: 'fail fast: courses still started after the run budget is used up (D-77)',
+    file: 'src/sync/run.ts',
+    from: '    if (budget.workExhausted()) {',
+    to: '    if (false) {',
+    tests: [SYNC],
+  },
+  {
+    name: 'fail fast: messages still sent past the finish deadline (D-77)',
+    file: 'src/notify/queue.ts',
+    from: '    if (!env.dryRun && env.deadline !== undefined && budgetNow() >= env.deadline) {',
+    to: '    if (false) {',
+    tests: [SYNC],
+  },
+  {
+    name: 'fail fast: the integrity check ignores its deadline (D-77)',
+    file: 'src/archive/integrity.ts',
+    from: '    if (budgetNow() >= deadline) break;',
+    to: '',
+    tests: [ARCHIVE],
+  },
+  {
+    name: 'gap report: a run that reached the sync counted as never started (D-77)',
+    file: 'src/sync/gap-runs.ts',
+    from: '  const silent = runs.filter((r) => !startedIds.has(r.id));',
+    to: '  const silent = runs.filter(() => true);',
+    tests: ['test/unit/failfast.test.ts'],
+  },
+  {
+    name: 'gap report: asks GitHub about runs from before the gap (D-77)',
+    file: 'src/sync/run.ts',
+    from: '  const ghRuns = await lookup(new Date(prevSlot.getTime() + 60_000), ctx.startedAt);',
+    to: '  const ghRuns = await lookup(new Date(prevSlot.getTime() - 3_600_000), ctx.startedAt);',
+    tests: [SYNC],
+  },
+  {
+    name: 'the sync job granted write access to Actions (D-77)',
+    file: '.github/workflows/sync.yml',
+    from: '      actions: read\n',
+    to: '      actions: write\n',
+    tests: ['test/unit/schedule.test.ts'],
+  },
+  {
+    name: 'mirror: a file the helper downloaded not copied in the same run (D-77)',
+    file: 'src/mirror/mirror.ts',
+    from: '&& deps.materialize !== undefined && deps.materialize(src)) {',
+    to: '&& false) {',
+    tests: ['test/unit/mirror.test.ts'],
+  },
+  {
+    name: 'mirror: the helper called for any read error, not only the -11 refusal (D-77)',
+    file: 'src/mirror/mirror.ts',
+    from: '      if ((deps.isDatalessRefusal ?? isDatalessRefusal)(error) &&',
+    to: '      if (true &&',
+    tests: ['test/unit/mirror.test.ts'],
+  },
+  {
+    name: 'mirror: error -110 mistaken for the -11 refusal (D-77)',
+    file: 'src/mirror/mirror.ts',
+    from: '/system error -11\\b/',
+    to: '/system error -11/',
+    tests: ['test/unit/mirror.test.ts'],
+  },
+  {
+    name: 'materialize helper: follows a symlink out of the archive (D-77)',
+    file: 'native/materialize.c',
+    from: 'open(argv[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC)',
+    to: 'open(argv[i], O_RDONLY | O_CLOEXEC)',
+    tests: ['test/unit/materialize-helper.test.ts'],
+  },
+  {
+    name: 'materialize helper: never switches materialization on (D-77)',
+    file: 'native/materialize.c',
+    from: 'IOPOL_MATERIALIZE_DATALESS_FILES_ON)',
+    to: 'IOPOL_MATERIALIZE_DATALESS_FILES_DEFAULT)',
+    tests: ['test/unit/materialize-helper.test.ts'],
   },
   {
     name: 'ignore quiet hours',
@@ -819,15 +924,18 @@ const MUTATIONS: Mutation[] = [
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
-const COPY = ['src', 'test', 'migrations', '.github', 'package.json', 'tsconfig.json', 'README.md'];
+const COPY = ['src', 'test', 'migrations', '.github', 'native', 'package.json', 'tsconfig.json', 'README.md'];
 
 function failures(dir: string, tests: string[]): { failed: number; output: string } {
   const run = spawnSync(process.execPath, ['--test', ...tests], { cwd: dir, encoding: 'utf8', timeout: 180_000 });
   const output = `${run.stdout}${run.stderr}`;
   const match = /^ℹ fail (\d+)$/m.exec(output);
+  // A test that runs past its own time limit is reported as "cancelled", not
+  // "fail" (D-77): it counts as failing, or a hang would pass for a catch.
+  const cancelled = Number(/^ℹ cancelled (\d+)$/m.exec(output)?.[1] ?? 0);
   // No summary line at all means the run itself broke -- count it as failing,
   // but say so, so a crash is never mistaken for a caught mutation.
-  return { failed: match === null ? -1 : Number(match[1]), output };
+  return { failed: match === null ? -1 : Number(match[1]) + cancelled, output };
 }
 
 const work = mkdtempSync(path.join(tmpdir(), 'canvas-mutation-'));

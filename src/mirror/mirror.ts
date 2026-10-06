@@ -24,6 +24,10 @@
  * The source is verified against the archive's recorded SHA-256 before any
  * copy, which also catches OneDrive files that are online-only and not yet
  * downloaded, or still syncing: those are deferred to the next run.
+ *
+ * An online-only file macOS refuses to download for this background job
+ * (error -11, EDEADLK; D-73) is handed to the materialize helper (D-77), which
+ * downloads it as its own child process, and the copy is tried once more.
  */
 
 import { createHash } from 'node:crypto';
@@ -68,6 +72,8 @@ export interface MirrorReport {
   copied: Array<{ id: string; from: string; to: string }>;
   adopted: Array<{ id: string; to: string }>;
   deferred: Array<{ id: string; from: string; reason: string }>;
+  /** Files the helper downloaded first (D-77). */
+  materialized: string[];
   skipped: Array<{ id: string; from: string; reason: string }>;
   followed: Array<{ id: string; from: string; to: string }>;
   left: Array<{ id: string; at: string; reason: string }>;
@@ -86,6 +92,19 @@ export interface MirrorDeps {
   saveState: (state: MirrorState) => void;
   /** Per-file read timeout: an online-only file that will not download in time is deferred. */
   readTimeoutMs?: number;
+  /**
+   * The materialize helper (D-77): download this guard-approved archive file,
+   * true if it says it did. Absent (no helper built): no retry, as before.
+   */
+  materialize?: (source: string) => boolean;
+  /** Whether a read error is macOS refusing an online-only download; injectable for tests. */
+  isDatalessRefusal?: (error: unknown) => boolean;
+}
+
+/** macOS refused to download an online-only file for this process: "Unknown system error -11" (EDEADLK, D-73). */
+export function isDatalessRefusal(error: unknown): boolean {
+  const e = (error ?? {}) as { errno?: unknown; code?: unknown; message?: unknown };
+  return e.errno === -11 || e.code === 'EDEADLK' || /system error -11\b/.test(String(e.message ?? ''));
 }
 
 export class MirrorRefusal extends Error {}
@@ -116,7 +135,7 @@ function variant(dest: string, n: number): string {
 
 export async function runMirror(deps: MirrorDeps): Promise<MirrorReport> {
   const { guard, files, dryRun } = deps;
-  const report: MirrorReport = { mode: deps.mode, dryRun, baselined: 0, copied: [], adopted: [], deferred: [], skipped: [], followed: [], left: [] };
+  const report: MirrorReport = { mode: deps.mode, dryRun, baselined: 0, copied: [], adopted: [], deferred: [], materialized: [], skipped: [], followed: [], left: [] };
   const at = deps.now().toISOString();
 
   // --- 1. Baseline.
@@ -170,8 +189,23 @@ export async function runMirror(deps: MirrorDeps): Promise<MirrorReport> {
       hash = await stageCopy(src, staged, deps.readTimeoutMs ?? 120_000);
     } catch (error) {
       rmSync(staged, { force: true });
-      report.deferred.push({ id: f.id, from: f.targetPath, reason: `could not read the source (online-only and offline, or syncing): ${error instanceof Error ? error.message : String(error)}` });
-      continue;
+      let last: unknown = error;
+      let read: string | null = null;
+      // D-77: macOS refused the download for this job; the helper may fetch it, then try once more.
+      if ((deps.isDatalessRefusal ?? isDatalessRefusal)(error) && deps.materialize !== undefined && deps.materialize(src)) {
+        try {
+          read = await stageCopy(src, staged, deps.readTimeoutMs ?? 120_000);
+          report.materialized.push(f.id);
+        } catch (again) {
+          rmSync(staged, { force: true });
+          last = again;
+        }
+      }
+      if (read === null) {
+        report.deferred.push({ id: f.id, from: f.targetPath, reason: `could not read the source (online-only and offline, or syncing): ${last instanceof Error ? last.message : String(last)}` });
+        continue;
+      }
+      hash = read;
     }
     if (hash !== f.sha256) {
       rmSync(staged, { force: true });
