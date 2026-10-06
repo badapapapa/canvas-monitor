@@ -3196,3 +3196,85 @@ case long outages recur. No C (Mac fallback), no E (external scheduler).
   - all its resources are current;
   - no alert was raised, correctly, since a 24-hour staleness alert is the
     threshold.
+
+---
+
+## D-76 — Two days on the new schedule: measured, the five "timeouts" explained, and four proposals · 2026-10-06
+
+**The schedule since `e46c2db`,** measured read-only from the Actions run
+history and the `runs` table:
+- **Monday 5 Oct (SGT): 46 of 108 slots ran.** By day 37 of 90, at night 9 of
+  18.
+- **Tuesday to 09:30:** all night slots ran; by day, 3 of 9.
+- **GitHub thins the daytime cadence.** It delivers scheduled runs every 16–36
+  minutes by day (about 25 at the median), whatever the cron asks for. Nights
+  are close to the 30 minutes asked for.
+- **Before this period,** with the old 20-minute cron, every slot had run for
+  13 days, during a calmer stretch, so the two are not directly comparable.
+- **One long stretch with no run:** Sun 23:58 to Mon 04:42 SGT (4.7 h).
+
+**The five failed runs (Tue 6 Oct, 03:00–05:12 SGT): no service hung; our
+code never started.**
+- Each job was created, **never assigned a runner**, ran zero steps, and was
+  cancelled by GitHub about 15 minutes later. The log archives are empty.
+- None reached Canvas, Turso, OneDrive or Telegram. None took the lock, so no
+  later run skipped, and none wrote a `runs` row.
+- GitHub's status feed has an "Incident with Actions" on 5 Oct about
+  "GitHub-hosted runner assignment and workflow start times".
+- The gap report's "5 scheduled runs never happened" was half-true: they were
+  created, but never ran.
+
+**Request timeouts, checked:** Canvas 20 s, Telegram 15 s, OneDrive 30 s
+(120 s for transfers), Healthchecks 5 s. **Turso has none.** The integrity
+check has no time budget of its own.
+
+**Mirror:** all 56 deferrals since 4 Oct were error -11, so the pin does not
+keep new files downloaded.
+
+**Follow-ups:** the module's labs 1–3 each had one answer file; Lab 4 had two
+("Part 1", "Part 2"); Lab 5 has Part 1 so far. The question files are single
+PDFs. **Nothing in the filenames says how many parts a lab has.**
+
+**Proposed, not built (awaiting the owner):**
+1. **D, the self-relay: not recommended after all.**
+   - **It would hold a GitHub-hosted runner around the clock** (a job that
+     dispatches a sync, sleeps 10 minutes, and repeats for up to 6 hours).
+   - **GitHub's terms** say hosted runners are not for activity "unrelated to
+     the production, testing, deployment, or publication of the software
+     project", and forbid "disproportionate" burden, citing "part of a
+     serverless application". An always-sleeping timer job is the clearest
+     form of that.
+   - **It would not have helped on 5 Oct,** when runners themselves could
+     not be assigned.
+   - **Instead:** keep the cron, watch for a week, and if days stay at about
+     25 minutes, return daytime to 20 minutes, which ran 100% for 13 days.
+     Make the alerts state exactly what happened (2).
+2. **Alerts that say what happened, and fail-fast hardening.**
+   - **Ask GitHub:** the gap report asks GitHub, with the run's own token and
+     `actions: read` on the job, what became of the runs in the gap. It then
+     reports runs "created but never given a machine", "ran and failed", or
+     "never created".
+   - **Hardening, not the cause of 5 Oct:**
+     - a request timeout for Turso (main and read-model clients);
+     - a time budget for the integrity check, and one per course, so one slow
+       part fails alone;
+     - a run budget that leaves time to release the lock and ping
+       Healthchecks.
+3. **Mirror: a materialize helper, not a launcher.**
+   - **What:** a tiny native helper, spawned by the mirror only for files
+     deferred with -11. It turns dataless-file materialization on for itself
+     (`setiopolicy_np`), reads the file through so OneDrive downloads it, and
+     exits; the mirror retries the copy in the same run.
+   - **Why not a launcher:** the mirror's own node stays the LaunchAgent's
+     program, and so (expected) the process macOS holds responsible for
+     OneDrive access, keeping its Files and Folders grant (D-59).
+   - **Tested before adopting,** under launchd, on a file made online-only on
+     purpose.
+4. **Multi-part answers: the owner declares a follow-up's part count.**
+   - **The command:** `followups parts <id> --of N`. The follow-up then closes
+     itself once parts 1..N all have answers, including retroactively.
+   - **Reminders** show "Part 1 of ? answered", with a hint from the module's
+     history.
+   - **Not guessed:** the part count is never inferred, because labs vary (1,
+     then 2) and a wrong guess would close early and stop the reminders.
+   - **Needs** a migration, which is the owner's to run.
