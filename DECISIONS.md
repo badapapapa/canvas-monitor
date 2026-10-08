@@ -3425,3 +3425,49 @@ codes, and a source check.
 - **Recommendation:** no emergency. If the account's standing matters for
   applications, plan a move to Cloud Run Jobs at a calm time, and keep the
   GitHub footprint small meanwhile, as now: a 20-minute cadence, no D.
+
+**Update, 2026-10-08: the permission test, as run by the owner.** After the
+push (`e46c2db..6ff57b9`), the helper was built (`Signature=adhoc`, self-test
+ok) and the one-shot test agent ran.
+- **What it showed:** the test ran as the mirror's own node, with no
+  permission prompt and no error. That proves the helper runs under launchd
+  without disturbing the mirror's Files and Folders grant.
+- **What it did not test:** the file was still downloaded (`"before":"ok"`),
+  so the -11 path itself was not exercised. "Free Up Space" on an archive file
+  left it at 608 KB on disk, even after unticking "Always Keep on This Device"
+  for that file, and no other way to make one online-only on purpose was
+  found.
+- **The live test:** the next new Canvas file that arrives online-only. The
+  mirror log will show it in `materialized`, rather than in `deferred` with
+  -11. Until that is seen, the -11 path is tested only by the unit tests (an
+  injected refusal) and by the helper's own compiled tests.
+
+---
+
+## D-78 — A mutation counts as caught only by a failed assertion · 2026-10-08
+
+**What the owner noticed:** mutation #20 (Turso requests with no timeout) was
+"caught" only because the run crashed, not by a failing assertion.
+- **The cause, under that mutation:** the test's query hung against a silent
+  server, the test's own time limit cancelled it, and the open connection kept
+  the test file from finishing until the checker's 180 s limit killed it.
+- **How the checker counted it:** a run with no summary was counted "CAUGHT,
+  but the run crashed". And since D-77, a timed-out test also counted as a
+  catch. Either could happen for an unrelated reason, so either could hide a
+  bug the tests do not actually check.
+
+**Now:**
+- **The checker** (`scripts/mutation-check.ts`) counts a mutation as caught
+  **only when at least one test fails on an assertion**.
+- **Never a catch:** a run that crashes, or hangs with no summary, and a run
+  where tests only timed out. Each is a problem to fix, by making a test fail
+  on an assertion instead.
+- **The baseline** must have no failures, no timed-out tests and no crash.
+- **The two tests that relied on hanging** now race the request against a short
+  timer, with `settleWithin`, and assert on the outcome:
+  - the Turso timeout: "still waiting after 3 s" fails the assertion;
+  - the Canvas deadline: "still waiting 1.2 s past the deadline" fails it.
+
+  Their silent server now also closes its open connections at the end, so a
+  hanging request cannot keep the file running. Checked by hand: under each
+  mutation the file finishes with one assertion failure and nothing cancelled.

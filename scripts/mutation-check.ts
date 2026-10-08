@@ -926,16 +926,19 @@ const MUTATIONS: Mutation[] = [
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));
 const COPY = ['src', 'test', 'migrations', '.github', 'native', 'package.json', 'tsconfig.json', 'README.md'];
 
-function failures(dir: string, tests: string[]): { failed: number; output: string } {
+/**
+ * One test run's outcome. Only a FAILED ASSERTION counts as catching a
+ * mutation (D-78). A test that ran past its own time limit ("cancelled") or a
+ * run that crashed with no summary at all could have happened for an
+ * unrelated reason, so neither is ever a catch: both are reported as problems
+ * to fix, by making the test fail on an assertion instead.
+ */
+function failures(dir: string, tests: string[]): { failed: number; cancelled: number; crashed: boolean; output: string } {
   const run = spawnSync(process.execPath, ['--test', ...tests], { cwd: dir, encoding: 'utf8', timeout: 180_000 });
   const output = `${run.stdout}${run.stderr}`;
-  const match = /^ℹ fail (\d+)$/m.exec(output);
-  // A test that runs past its own time limit is reported as "cancelled", not
-  // "fail" (D-77): it counts as failing, or a hang would pass for a catch.
-  const cancelled = Number(/^ℹ cancelled (\d+)$/m.exec(output)?.[1] ?? 0);
-  // No summary line at all means the run itself broke -- count it as failing,
-  // but say so, so a crash is never mistaken for a caught mutation.
-  return { failed: match === null ? -1 : Number(match[1]) + cancelled, output };
+  const failed = /^ℹ fail (\d+)$/m.exec(output);
+  const cancelled = /^ℹ cancelled (\d+)$/m.exec(output);
+  return { failed: Number(failed?.[1] ?? 0), cancelled: Number(cancelled?.[1] ?? 0), crashed: failed === null, output };
 }
 
 const work = mkdtempSync(path.join(tmpdir(), 'canvas-mutation-'));
@@ -953,7 +956,7 @@ try {
 
   const allTests = [...new Set(MUTATIONS.flatMap((m) => m.tests))];
   const baseline = failures(work, allTests);
-  if (baseline.failed !== 0) {
+  if (baseline.failed !== 0 || baseline.cancelled !== 0 || baseline.crashed) {
     console.error('Baseline is not green, so no mutation result would mean anything:\n');
     console.error(baseline.output.slice(-3000));
     process.exit(1);
@@ -973,10 +976,14 @@ try {
     writeFileSync(target, original.replace(m.from, m.to));
     const result = failures(work, m.tests);
     writeFileSync(target, original);
-    if (result.failed > 0) {
-      console.log(`${label}\n    CAUGHT (${result.failed} failing test${result.failed === 1 ? '' : 's'})\n`);
-    } else if (result.failed === -1) {
-      console.log(`${label}\n    CAUGHT, but the run crashed rather than failing an assertion; inspect by hand\n`);
+    if (result.crashed) {
+      problems += 1;
+      console.log(`${label}\n    NOT A CLEAN CATCH: the run crashed or hung with no test summary. Make a test fail on an assertion instead.\n`);
+    } else if (result.failed > 0) {
+      console.log(`${label}\n    CAUGHT (${result.failed} failing test${result.failed === 1 ? '' : 's'})${result.cancelled > 0 ? `; ${result.cancelled} also timed out` : ''}\n`);
+    } else if (result.cancelled > 0) {
+      problems += 1;
+      console.log(`${label}\n    NOT A CLEAN CATCH: ${result.cancelled} test${result.cancelled === 1 ? '' : 's'} timed out, none failed an assertion. Make a test fail on an assertion instead.\n`);
     } else {
       problems += 1;
       console.log(`${label}\n    NOT CAUGHT: the tests still pass with this bug in place\n`);

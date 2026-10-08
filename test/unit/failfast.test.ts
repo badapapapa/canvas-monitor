@@ -18,7 +18,24 @@ import { RunBudget } from '../../src/sync/budget.ts';
 import { describeGap, explainGap, gapRunsFromEnvironment } from '../../src/sync/gap-runs.ts';
 
 const servers: Server[] = [];
-after(() => { for (const s of servers) s.close(); });
+// Close open connections too: a request left hanging (as under a mutation that
+// removes a timeout) must not keep this test file running.
+after(() => { for (const s of servers) { s.closeAllConnections(); s.close(); } });
+
+/**
+ * How a promise settles within `ms`. A hang becomes a value an assertion can
+ * check -- so a missing timeout fails on an assertion, never by the test file
+ * timing out or crashing, which the mutation check does not count as a catch.
+ */
+async function settleWithin(p: Promise<unknown>, ms: number): Promise<'resolved' | 'rejected' | 'still waiting'> {
+  let timer: NodeJS.Timeout | undefined;
+  const waited = new Promise<'still waiting'>((r) => { timer = setTimeout(() => r('still waiting'), ms); });
+  try {
+    return await Promise.race([p.then(() => 'resolved' as const, () => 'rejected' as const), waited]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 /** A server that accepts connections and never answers. */
 async function silentServer(): Promise<string> {
@@ -29,13 +46,12 @@ async function silentServer(): Promise<string> {
 }
 
 describe('Turso request timeout', () => {
-  it('a database that never answers fails the query quickly instead of hanging the run', { timeout: 5_000 }, async () => {
+  it('a database that never answers fails the query quickly instead of hanging the run', async () => {
     const url = await silentServer();
     const client = createClient({ url, authToken: 't', fetch: fetchWithTimeout(200) });
-    const started = Date.now();
-    await assert.rejects(() => client.execute('SELECT 1'));
-    assert.ok(Date.now() - started < 3_000, `took ${Date.now() - started} ms`);
+    const outcome = await settleWithin(client.execute('SELECT 1'), 3_000);
     client.close();
+    assert.equal(outcome, 'rejected', 'the query was still waiting after 3 s: Turso requests have no timeout');
   });
 
   it('both databases use it: the main one and the read model', () => {
@@ -59,13 +75,13 @@ describe('Canvas deadline', () => {
     init?.signal?.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'TimeoutError' })));
   });
 
-  it('a request still running at the deadline is cut off, and not retried past it', { timeout: 5_000 }, async () => {
+  it('a request still running at the deadline is cut off, and not retried past it', async () => {
     const h = http(hanging);
     h.setDeadline(Date.now() + 300);
-    const started = Date.now();
-    const result = await h.get('/courses/1');
-    assert.equal(result.kind, 'error');
-    assert.ok(Date.now() - started < 1_500, `took ${Date.now() - started} ms`);
+    const pending = h.get('/courses/1');
+    const outcome = await settleWithin(pending, 1_500);
+    assert.equal(outcome, 'resolved', 'still waiting 1.2 s past the deadline: the request was not cut off');
+    assert.equal((await pending).kind, 'error');
   });
 
   it('no request starts after the deadline', async () => {
