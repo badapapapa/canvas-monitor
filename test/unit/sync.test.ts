@@ -766,6 +766,15 @@ describe('sync end to end', () => {
     assert.equal(ops(h).length, 0);
   });
 
+  it('says nothing about a 1.3-hour, three-slot gap while on GitHub (D-79)', async () => {
+    await sync(h);
+    h.sent.length = 0;
+    await priorRun(h, '2026-09-17T03:07:00.000Z');
+    h.clock.set('2026-09-17T04:30:00Z');
+    await sync(h, { scheduledFor: new Date('2026-09-17T04:27:00Z') }); // skipped 03:27, 03:47, 04:07
+    assert.equal(ops(h).length, 0, 'a three-slot gap was reported');
+  });
+
   it("says what GitHub did with the runs in a gap: cancelled before starting, or never created (D-77)", async () => {
     await sync(h);
     h.sent.length = 0;

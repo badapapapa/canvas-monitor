@@ -17,7 +17,8 @@
  *     open a module, log out; every request stays on http, no HSTS, no CSP
  *     violation, the cookie HttpOnly/Secure/Strict and invisible to scripts
  *     (D-67: Safari followed upgrade-insecure-requests to https://localhost);
- *   - a preview environment (VERCEL_ENV=preview) serves nothing at all.
+ *   - a preview environment (VERCEL_ENV=preview) serves nothing at all;
+ *   - the image optimiser, /_next/image, answers 404 to everyone (D-79).
  *
  * Invented data only. Uses a random local port and temporary files.
  */
@@ -163,6 +164,14 @@ try {
   assert.ok(scripts.length > 0 && scripts.every((t) => t.includes(`nonce="${nonce}"`)), 'every script carries the nonce');
   assert.equal((await get('/m/1', cookie)).status, 200);
   assert.equal((await get('/m/999', cookie)).status, 404);
+  // The image optimiser is switched off (D-79): 404 with or without a session, for any source.
+  for (const p of ['/_next/image?url=%2Ffavicon.ico&w=64&q=75', '/_next/image?url=https%3A%2F%2Fexample.test%2Fa.svg&w=64&q=75', '/_next/image']) {
+    for (const c of [undefined, cookie]) {
+      const res = await get(p, c);
+      assert.equal(res.status, 404, `${p} ${c === undefined ? 'without' : 'with'} a session: the image optimiser answered`);
+      checkHeaders(res, p);
+    }
+  }
   assert.ok(!/ZZ9999|Invented/.test(logs()), 'no course data in the server logs');
 
   // --- real browser engines: the whole login flow, as the owner uses the preview ------------

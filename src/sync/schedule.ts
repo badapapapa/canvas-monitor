@@ -21,6 +21,22 @@ export const SYNC_SCHEDULES = ['7,27,47 0-14 * * *', '13,43 15-23 * * *'] as con
  */
 export const MISSED_SLOTS_REPORT_THRESHOLD = 3;
 
+/**
+ * While the sync runs on GitHub (D-79), a gap is also reported only when the
+ * sync before it was MORE than two hours earlier: six missed slots by day, four
+ * at night. GitHub now drops about 60% of scheduled runs, so three-slot gaps
+ * came 2-4 times a day, each recovered by the next run. Healthchecks still
+ * catches a real stop. After the move off GitHub, set this back to 0, which
+ * restores the three-slot rule above.
+ */
+export const GAP_REPORT_MIN_MS = 2 * 3600_000;
+
+/** Whether the gap between the previous sync's slot and this one is reported. */
+export function gapIsReported(previousSlot: Date, thisSlot: Date): boolean {
+  return slotsBetween(previousSlot, thisSlot) >= MISSED_SLOTS_REPORT_THRESHOLD &&
+    thisSlot.getTime() - previousSlot.getTime() > GAP_REPORT_MIN_MS;
+}
+
 const matchers = SYNC_SCHEDULES.map(parseCron);
 
 /** Scheduled slots strictly between two slots -- the runs that never happened. */

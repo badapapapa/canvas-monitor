@@ -72,7 +72,7 @@ export function describeGap(missed: number, e: GapExplanation | null): string {
   }
   const parts: string[] = [];
   if (e.cancelled > 0) parts.push(`GitHub created ${runs(e.cancelled)} but cancelled ${e.cancelled === 1 ? 'it' : 'them'} before ${e.cancelled === 1 ? 'it' : 'they'} started (no machine was assigned in time)`);
-  if (e.failedBeforeStart > 0) parts.push(`${runs(e.failedBeforeStart)} failed before the sync itself started`);
+  if (e.failedBeforeStart > 0) parts.push(`${runs(e.failedBeforeStart)} failed before recording its start`);
   if (e.stillWaiting > 0) parts.push(`${runs(e.stillWaiting)} ${e.stillWaiting === 1 ? 'is' : 'are'} still waiting for a machine`);
   if (e.neverCreated > 0) parts.push(`GitHub never created a run for ${e.neverCreated} slot${e.neverCreated === 1 ? '' : 's'}`);
   return `${missed} scheduled slot${missed === 1 ? '' : 's'} produced no sync: ${parts.join('; ')}.`;

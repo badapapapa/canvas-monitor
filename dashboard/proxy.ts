@@ -2,6 +2,8 @@
  * The dashboard's outer gate (DECISIONS.md D-65). Runs before every request
  * except Next's own build assets (which hold no data).
  *
+ *   0. Next's image optimiser, /_next/image: 404, always (D-79). The dashboard
+ *      shows no images, so the endpoint has nothing to do.
  *   1. Not the production deployment (a preview, or anywhere unasked):
  *      404 for everything, the login form included.
  *   2. Any secret missing: 503, nothing else.
@@ -29,6 +31,7 @@ export async function proxy(request: NextRequest): Promise<Response> {
     return res;
   };
 
+  if (request.nextUrl.pathname.startsWith('/_next/image')) return finish(new NextResponse('Not found', { status: 404 }));
   if (!servingAllowed()) return finish(new NextResponse('Not found', { status: 404 }));
   const s = secrets();
   if (s === null) return finish(new NextResponse('Not configured', { status: 503 }));
@@ -52,5 +55,5 @@ export async function proxy(request: NextRequest): Promise<Response> {
 }
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/((?!_next/static|favicon.ico).*)'],
 };

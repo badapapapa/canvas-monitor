@@ -54,7 +54,7 @@ import { setConfig } from '../core/config.ts';
 import type { CoverageStatus } from '../discover/coverage.ts';
 import { loadMigrations } from '../core/db/migrate.ts';
 import { ping } from './healthcheck.ts';
-import { MISSED_SLOTS_REPORT_THRESHOLD, slotsBetween } from './schedule.ts';
+import { gapIsReported, slotsBetween } from './schedule.ts';
 import { DEFAULT_BUDGETS, RunBudget, type Budgets } from './budget.ts';
 import { describeGap, explainGap, gapRunsFromEnvironment, type GapExplanation, type GapRunsLookup } from './gap-runs.ts';
 
@@ -1152,8 +1152,8 @@ async function reportScheduleGap(ctx: RunContext, now: Date, lookup: GapRunsLook
   const prevRaw = previous.rows[0]?.['scheduled_for'];
   if (prevRaw === undefined || prevRaw === null) return;
   const prevSlot = new Date(String(prevRaw));
+  if (!gapIsReported(prevSlot, thisSlot)) return;
   const missed = slotsBetween(prevSlot, thisSlot);
-  if (missed < MISSED_SLOTS_REPORT_THRESHOLD) return;
 
   const hours = (thisSlot.getTime() - prevSlot.getTime()) / 3600_000;
 

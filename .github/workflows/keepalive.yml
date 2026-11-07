@@ -2,14 +2,17 @@
 #
 # GitHub disables scheduled workflows in a repository with no activity for 60
 # days -- which is exactly what a finished, working system looks like, and
-# exactly when it would stop silently. Monthly, this pushes an empty commit if
-# the last commit is more than 45 days old. Busy months cost nothing.
+# exactly when it would stop silently. Daily, this pushes an empty commit if
+# the last commit is more than 45 days old; otherwise it does nothing. Busy
+# months cost nothing. Daily, not monthly (D-79): GitHub now drops most
+# scheduled runs, and between day 45 and day 60 there must be enough tries
+# that losing all of them is very unlikely (test/unit/keepalive.test.ts).
 
 name: keepalive
 
 on:
   schedule:
-    - cron: '17 3 1 * *'
+    - cron: '17 3 * * *'
   workflow_dispatch: {}
 
 permissions:

@@ -921,6 +921,56 @@ const MUTATIONS: Mutation[] = [
     to: '',
     tests: [READMODEL],
   },
+  // --- D-79: quieter gap reports while on GitHub; keepalive daily; the image optimiser off ---
+  {
+    name: 'gap report: the two-hour floor removed, so 1.3-hour gaps report again (D-79)',
+    file: 'src/sync/schedule.ts',
+    from: '    thisSlot.getTime() - previousSlot.getTime() > GAP_REPORT_MIN_MS;',
+    to: '    true;',
+    tests: ['test/unit/schedule.test.ts', SYNC],
+  },
+  {
+    name: 'gap report: a gap of exactly two hours reported (D-79)',
+    file: 'src/sync/schedule.ts',
+    from: '    thisSlot.getTime() - previousSlot.getTime() > GAP_REPORT_MIN_MS;',
+    to: '    thisSlot.getTime() - previousSlot.getTime() >= GAP_REPORT_MIN_MS;',
+    tests: ['test/unit/schedule.test.ts'],
+  },
+  {
+    name: 'gap report: a run that died before recording itself said not to have started the sync (D-79)',
+    file: 'src/sync/gap-runs.ts',
+    from: 'failed before recording its start`',
+    to: 'failed before the sync itself started`',
+    tests: ['test/unit/failfast.test.ts'],
+  },
+  {
+    name: 'keepalive back to once a month (D-79)',
+    file: '.github/workflows/keepalive.yml',
+    from: "    - cron: '17 3 * * *'",
+    to: "    - cron: '17 3 1 * *'",
+    tests: ['test/unit/keepalive.test.ts'],
+  },
+  {
+    name: "dashboard: the image optimiser answers again (the proxy's 404 removed) (D-79)",
+    file: 'dashboard/proxy.ts',
+    from: "  if (request.nextUrl.pathname.startsWith('/_next/image')) return finish(new NextResponse('Not found', { status: 404 }));\n",
+    to: '',
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'dashboard: the proxy skips the image endpoint again (D-79)',
+    file: 'dashboard/proxy.ts',
+    from: "matcher: ['/((?!_next/static|favicon.ico).*)'],",
+    to: "matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],",
+    tests: [DASHBOARD],
+  },
+  {
+    name: 'dashboard: image optimisation switched back on in the build (D-79)',
+    file: 'dashboard/next.config.ts',
+    from: '  images: { unoptimized: true },\n',
+    to: '',
+    tests: [DASHBOARD],
+  },
 ];
 
 const ROOT = path.resolve(fileURLToPath(new URL('..', import.meta.url)));

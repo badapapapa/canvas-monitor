@@ -208,6 +208,21 @@ describe('dashboard proxy: no page, no route, no data without a session', () => 
     assert.equal((await proxy(req('/', `${SESSION_COOKIE}=forged.value`))).status, 303, 'a forged cookie is no session');
   });
 
+  it("switches Next's image optimiser off: 404 for everyone, and the proxy sees every request for it (D-79)", async () => {
+    const v = await signSession({ secret: SECRET, passwordHash: HASH_A, nowSeconds: Math.floor(Date.now() / 1000) });
+    for (const p of ['/_next/image', '/_next/image?url=%2Fa.svg&w=64&q=75', '/_next/image?url=https%3A%2F%2Fexample.test%2Fa.png&w=64&q=75']) {
+      for (const cookie of [undefined, `${SESSION_COOKIE}=${v}`]) {
+        const res = await proxy(req(p, cookie));
+        assert.equal(res.status, 404, `${p} ${cookie === undefined ? 'without' : 'with'} a session`);
+        assert.match(res.headers.get('content-security-policy') ?? '', /frame-ancestors 'none'/);
+      }
+    }
+    const { config } = (await import('../../dashboard/proxy.ts')) as unknown as { config: { matcher: string[] } };
+    for (const m of config.matcher) assert.doesNotMatch(m, /_next\/image/, 'the proxy must not skip the image endpoint');
+    // Read as text: importing the config would pull Next's global types into this project's typecheck.
+    assert.match(readFileSync('dashboard/next.config.ts', 'utf8'), /^\s*images: \{ unoptimized: true \},$/m, 'image optimisation switched off in the build');
+  });
+
   it('lets the login page and a valid session through, with the security headers on everything', async () => {
     const login = await proxy(req('/login'));
     assert.equal(login.headers.get('x-middleware-next'), '1');

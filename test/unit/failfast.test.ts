@@ -128,7 +128,7 @@ describe('gap report: what GitHub did with the runs in a gap', () => {
     ];
     const e = explainGap(6, runs, new Set(['4']));
     assert.deepEqual(e, { cancelled: 1, failedBeforeStart: 1, stillWaiting: 1, neverCreated: 3 });
-    assert.equal(describeGap(6, e), '6 scheduled slots produced no sync: GitHub created 1 run but cancelled it before it started (no machine was assigned in time); 1 run failed before the sync itself started; 1 run is still waiting for a machine; GitHub never created a run for 3 slots.');
+    assert.equal(describeGap(6, e), '6 scheduled slots produced no sync: GitHub created 1 run but cancelled it before it started (no machine was assigned in time); 1 run failed before recording its start; 1 run is still waiting for a machine; GitHub never created a run for 3 slots.');
     assert.equal(describeGap(5, null), "5 scheduled slots produced no sync (GitHub's run history could not be read to say why).");
   });
 

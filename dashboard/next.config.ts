@@ -12,6 +12,10 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   reactStrictMode: true,
   productionBrowserSourceMaps: false,
+  // The image optimiser is switched off: the dashboard shows no images, and
+  // its endpoint is where Next's worst advisories have been (D-79). proxy.ts
+  // also answers 404 for it, so it is off even if this were undone.
+  images: { unoptimized: true },
   turbopack: { root },
   outputFileTracingRoot: root,
   async headers() {

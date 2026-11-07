@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { describe, it } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { MISSED_SLOTS_REPORT_THRESHOLD, SYNC_SCHEDULES, slotsBetween } from '../../src/sync/schedule.ts';
+import { GAP_REPORT_MIN_MS, MISSED_SLOTS_REPORT_THRESHOLD, SYNC_SCHEDULES, gapIsReported, slotsBetween } from '../../src/sync/schedule.ts';
 
 const WORKFLOW = fileURLToPath(new URL('../../.github/workflows/sync.yml', import.meta.url));
 
@@ -58,5 +58,21 @@ describe('sync schedule', () => {
 
   it('reports from three missed slots: an hour by day, 90 minutes at night', () => {
     assert.equal(MISSED_SLOTS_REPORT_THRESHOLD, 3);
+  });
+
+  it('while on GitHub, reports only a gap of MORE than two hours: six slots by day, four at night (D-79)', () => {
+    assert.equal(GAP_REPORT_MIN_MS, 2 * 3600_000);
+    const at = (iso: string) => new Date(iso);
+    // Day, 20-minute slots. The 1.3 h, three-slot gaps of late October: silent.
+    assert.equal(gapIsReported(at('2026-11-04T05:47:00Z'), at('2026-11-04T07:07:00Z')), false, '3 day slots, 1.3 h');
+    assert.equal(gapIsReported(at('2026-11-04T05:07:00Z'), at('2026-11-04T07:07:00Z')), false, '5 day slots, exactly 2 h');
+    assert.equal(gapIsReported(at('2026-11-04T05:07:00Z'), at('2026-11-04T07:27:00Z')), true, '6 day slots, 2.3 h');
+    // Night, 30-minute slots.
+    assert.equal(gapIsReported(at('2026-11-04T16:13:00Z'), at('2026-11-04T18:13:00Z')), false, '3 night slots, exactly 2 h');
+    assert.equal(gapIsReported(at('2026-11-04T16:13:00Z'), at('2026-11-04T18:43:00Z')), true, '4 night slots, 2.5 h');
+    // Across the day-to-night change: 14:07 -> 16:43 misses 14:27, 14:47, 15:13, 15:43, 16:13.
+    assert.equal(gapIsReported(at('2026-11-04T14:07:00Z'), at('2026-11-04T16:43:00Z')), true, '5 slots, 2.6 h');
+    // A full day still reports.
+    assert.equal(gapIsReported(at('2026-11-03T04:07:00Z'), at('2026-11-04T04:27:00Z')), true);
   });
 });

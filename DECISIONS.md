@@ -3471,3 +3471,186 @@ ok) and the one-shot test agent ran.
   Their silent server now also closes its open connections at the end, so a
   hanging request cannot keep the file running. Checked by hand: under each
   mutation the file finishes with one assertion failure and nothing cancelled.
+
+## D-79 — Quieter gap reports while on GitHub; keepalive daily; the dashboard upgraded with the image optimiser off; the Cloud Run plan · 2026-11-07
+
+**From the 30 October maintenance check, the owner approved:**
+- the dashboard upgrade, with the image endpoint switched off;
+- keepalive on several days a month;
+- the gap report's wording for a run that died early;
+- the Cloud Run plan, recorded here.
+
+On 7 November the owner also asked for quieter gap reports. All are below.
+
+**A project group switched again (7 Nov).** Checked read-only against Canvas
+(GET only) and the database (opened read-only, no run recorded). Only
+statuses, counts and yes/no answers are recorded; no names or ids.
+- **The old group refuses the token:** `403` for the group, its files and its
+  folders.
+  - The alert was raised once, at 11:49 SGT.
+  - As a `warn`, it would remind every 24 hours until the group is retired.
+- **Nothing was archived from the old group.**
+- **The new group:**
+  - It is the owner's only group in that module's parent course.
+  - Its name is the one the owner gave.
+  - It is readable (files and folders `200`), has no files, and is not in the
+    database.
+- **The same path as D-72 applies:** README, "A group changed". The 25 Sep
+  precedent confirms what the first sync does: a group with no files was
+  baselined and named in one "Now watching" message.
+
+**Gap reports: only gaps of more than two hours, while on GitHub.**
+- **Measured, 31 Oct – 6 Nov (UTC days):** 177 of 441 slots produced a run
+  (40%):
+  - by day, 108 of 315 (34%);
+  - at night, 69 of 126 (55%).
+
+  GitHub cancelled none and created none it failed to start. It simply
+  created no run for the rest.
+- **The noise:** 29 Oct – 6 Nov, 19 gap reports.
+  - 17 were exactly three slots, 1.3 h.
+  - 2 were four slots, one of those the run that failed before recording its
+    start.
+  - Each was fully recovered by the next run.
+  - The longest gap between consecutive syncs' slots since 28 Oct was 100
+    minutes. Under the rule below, none of the 19 would have been sent.
+- **Now:** a gap is reported only when the previous sync's slot was MORE than
+  two hours earlier, which is six missed slots by day and four at night, and
+  still at least three slots (`GAP_REPORT_MIN_MS` and `gapIsReported` in
+  `src/sync/schedule.ts`).
+- **The trade-off:**
+  - **A real stop is unchanged.** Healthchecks (1 h period, 30 min grace)
+    alerts about 90 minutes after the last successful run's ping. The gap
+    report was never the alarm for a stop: it is sent only when a run resumes.
+  - **The longest silent window grows from 1 h to 2 h** between syncs, plus
+    GitHub's start delay (median 8–16 min, up to ~30). Before, it was up to 2
+    missed day slots; now it is up to 5 by day or 3 at night.
+  - Beyond 90 minutes between pings, Healthchecks already reports down and up.
+    So the gap report now mostly explains why, for gaps of over two hours.
+- **After the move off GitHub, go back to the three-slot rule:** set
+  `GAP_REPORT_MIN_MS` to `0`. The tests say which assertions change.
+
+**A run that died before recording itself.** It was described as "failed
+before the sync itself started". It now reads "failed before recording its
+start". On 29 Oct the sync had started and died at its first database request.
+
+**Keepalive: daily, not "several days a month".**
+- **The approved first step was tested and was not enough.** Running on the
+  1st, 8th, 15th and 22nd with the 45-day rule, some 60-day windows held only
+  ONE try between day 45 and day 60. At GitHub's current ~60% drop rate,
+  that is a 60% chance of the workflows being disabled.
+- **Now:** it runs daily at 03:17 UTC and still pushes only when the last
+  commit is over 45 days old, so it is a no-op almost every day.
+- **The new test** (`test/unit/keepalive.test.ts`) counts the tries between
+  the push age and day 60, for a last commit at every hour of a year. It
+  requires that losing all of them at a 60% drop rate is under 1 in 100. Daily
+  gives at least 15 tries.
+
+**The dashboard: Next.js 16.3.6 → 16.4.3, and the image optimiser off.**
+- **What moved:** `npm install next@16.4.3 --save-exact --ignore-scripts`,
+  then `npm audit fix --ignore-scripts`. The lockfile moved only these, all
+  from registry.npmjs.org with integrity hashes:
+  - next and its @next binaries;
+  - sharp 0.35.5 and its libvips binaries;
+  - source-map-js 1.2.2;
+  - semver 7.8.6.
+- **`npm audit`:** 0, from 1 critical and 2 high.
+- **16.4.4 and 16.4.5 exist but were not taken.** They are only days old, and
+  16.4.3 is the approved and audited fix.
+- **The image endpoint is off in two layers:**
+  - `images: { unoptimized: true }` in `next.config.ts`;
+  - `proxy.ts` answers 404 for `/_next/image`, before anything else, with or
+    without a session. The proxy's matcher no longer skips that path.
+
+  The dashboard shows no images. Next's worst advisories this year were in
+  this endpoint, and it sat outside the login gate.
+- **Tests:**
+  - a unit test drives the real proxy: 404 for three image requests, with and
+    without a session, and the matcher and config checked;
+  - the smoke test checks the same against the real production build.
+- **The smoke run:** every HTTP check passed against the production build,
+  the new ones included. The browser part did not run: this Mac's Playwright
+  browser builds for Playwright 1.63 are missing. WebKit is absent, and the
+  Chromium in the cache is a different build. Installing them is a download,
+  for the owner to approve.
+
+**The Cloud Run plan (planning only; nothing built).** To move the sync off
+GitHub Actions in mid-December, onto Cloud Run Jobs started by Cloud
+Scheduler.
+- **The owner sets up:**
+  - a Google account with 2-step verification (a passkey or security key);
+  - a billing account, with a budget alert at US$1–5;
+  - one dedicated project.
+- **Region: Tokyo (`asia-northeast1`).** Both Turso databases are in
+  aws-ap-northeast-1. The main database takes many round trips per run, so it
+  decides the region.
+- **Secrets:**
+  - **Into Secret Manager:** the four from the GitHub secrets
+    (`TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, `READMODEL_DATABASE_URL`,
+    `READMODEL_WRITE_TOKEN`).
+  - **Who reads them:** the job's own service account, granted
+    `secretAccessor` on those four secrets only, not project-wide, plus the
+    owner as project owner.
+  - **The Scheduler's service account** may only start that one job, with
+    overrides. It reads no secret.
+  - **No service account keys are created.**
+  - **Unchanged, in the database config:** Canvas, OneDrive, Telegram and
+    Healthchecks.
+- **The job:**
+  - one image built from a Dockerfile, on a base pinned by digest;
+  - `npm ci --omit=dev --ignore-scripts`;
+  - stored in Artifact Registry in the same project;
+  - task timeout 10 minutes, matching the run budget's assumptions, and 0
+    retries;
+  - `CI=true`, so every "refused under CI" guard still holds.
+- **The schedule:** two Scheduler jobs with the same crons as
+  `SYNC_SCHEDULES`. Each passes its own `CRON_SCHEDULE` as an override, so
+  slot reconstruction and drift work as today.
+- **The gap report on Cloud Run:**
+  - The GitHub lookup has no token there, so it returns "could not tell".
+  - The wording about GitHub's run history must change at the move.
+  - Go back to the three-slot rule, as above.
+- **Healthchecks:** the pings are unchanged.
+- **Side by side, then switch:**
+  - Run both for about a week. The database lock already prevents overlapping
+    runs, so duplicates are impossible.
+  - Compare runs per slot.
+  - Then disable `sync.yml` and keepalive, which also ends the 60-day rule and
+    the GitHub-terms question.
+- **Rollback:** re-enable `sync.yml` and pause the Scheduler jobs. The GitHub
+  secrets are kept until the move is proven.
+- **Cost:** expected US$0–1 a month. To be confirmed on Google's pricing pages
+  at setup, not assumed:
+  - about 1,950 runs of about a minute;
+  - two Scheduler jobs;
+  - four secrets read once per run;
+  - a few hundred MB of OneDrive uploads a month as outgoing traffic.
+- **Risks that make moving riskier than staying:**
+  - a card on file (the budget alert reduces it);
+  - one more high-value account to protect;
+  - a container image to keep patched;
+  - the OneDrive sign-in token rotating while two hosts run side by side,
+    which is safe only because of the lock;
+  - new IAM to get right.
+
+  At ~40% of slots running, the move is worth it.
+
+**Tests and mutations:**
+- **Tests:** 505 pass, and the root and dashboard typechecks are clean.
+- **Mutation check: 7 new entries, 131 in total, all caught on a failed
+  assertion:**
+  - the two-hour floor removed;
+  - exactly two hours reported;
+  - the old "failed before the sync itself started" wording;
+  - keepalive back to monthly;
+  - the proxy's image 404 removed;
+  - the matcher skipping `/_next/image` again;
+  - image optimisation back on.
+- **A first run reported six "no test summary" problems,** five of them old
+  entries that were clean on 8 Oct. They did not recur:
+  - by hand, each mutated file failed on one assertion within 14 s;
+  - a full re-run kept awake with `caffeinate -i` caught all 131 cleanly in
+    4.5 minutes.
+
+  The likeliest cause is the Mac sleeping, or contention during the first,
+  longer run, which hit the checker's 180 s limit. Unconfirmed.
